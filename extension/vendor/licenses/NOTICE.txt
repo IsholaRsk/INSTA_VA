@@ -1,0 +1,9 @@
+Third-party components bundled for offline OCR
+
+- tesseract.js 6.0.1 — Apache-2.0; see TESSERACT_JS_APACHE-2.0.txt.
+- tesseract.js-core 6.1.2 — Apache-2.0; see TESSERACT_CORE_APACHE-2.0.txt.
+- @tesseract.js-data/eng 1.0.0 and @tesseract.js-data/fra 1.0.0 — MIT; see TESSDATA_MIT.txt.
+- Bundled regenerator-runtime notices — see TESSERACT_JS_BUNDLE_LICENSES.txt.
+- Worker bundle notices — see TESSERACT_WORKER_BUNDLE_LICENSES.txt.
+
+The JavaScript library, WASM runtime, and trained-data files are included under extension/vendor/.

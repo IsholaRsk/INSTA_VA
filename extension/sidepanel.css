@@ -1,0 +1,88 @@
+* { box-sizing: border-box; }
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #17212b;
+  background: #f4f7fa;
+  font-synthesis: none;
+}
+body { margin: 0; min-width: 300px; background: #f4f7fa; }
+.shell { display: grid; gap: 12px; padding: 16px 14px 20px; }
+.header { padding: 4px 2px 2px; }
+.eyebrow { color: #42708a; font-size: 10px; font-weight: 800; letter-spacing: .14em; }
+h1 { margin: 5px 0 6px; font-size: 21px; line-height: 1.2; }
+.header p { margin: 0; color: #60717f; font-size: 12px; line-height: 1.5; }
+.card { min-width: 0; padding: 13px; border: 1px solid #e0e7ed; border-radius: 12px; background: #fff; box-shadow: 0 2px 6px #1a2a3a0a; }
+label { display: block; margin-bottom: 7px; font-size: 12px; font-weight: 700; }
+label span { color: #7b8994; font-weight: 400; }
+input[type="text"], input[type="number"], select {
+  display: block; width: 100%; min-width: 0; border: 1px solid #d4dde5; border-radius: 8px;
+  padding: 9px 10px; color: #17212b; background: #fbfcfd; font: inherit; font-size: 12px;
+  outline: none;
+}
+input:focus, select:focus { border-color: #4184ab; box-shadow: 0 0 0 3px #4184ab20; }
+input:disabled, select:disabled { background: #eef2f5; color: #78858e; }
+.space-top { margin-top: 12px; }
+.hint { margin: 6px 0 0; color: #73818a; font-size: 10px; line-height: 1.5; }
+.options-card select { margin-bottom: 12px; }
+.number-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.number-grid label { min-height: 15px; }
+.section-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+h2 { margin: 0; font-size: 13px; }
+.list-heading { align-items: flex-start; }
+.selection-summary { display: block; margin-top: 4px; color: #71808a; font-size: 10px; }
+.button-row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 3px; }
+.target-list { display: grid; gap: 8px; margin-top: 11px; }
+.target-item { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 8px; padding: 10px; border: 1px solid #e2e8ed; border-radius: 9px; background: #fbfcfd; }
+.target-item.selected { border-color: #83b5ca; background: #f2f9fc; }
+.target-select { width: 16px; height: 16px; margin: 2px 0 0; accent-color: #176f93; }
+.target-content { min-width: 0; }
+.target-topline { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.target-pseudo { min-width: 0; color: #22323d; font-size: 12px; font-weight: 750; overflow-wrap: anywhere; }
+.target-actions { display: flex; flex: 0 0 auto; gap: 3px; }
+.target-meta { margin: 5px 0 0; color: #62727d; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; }
+.empty-targets { margin: 12px 0 0; padding: 13px; border: 1px dashed #cbd7df; border-radius: 8px; color: #71808a; font-size: 11px; text-align: center; }
+.bulk-card .hint { margin: 5px 0 10px; }
+.bulk-row { display: grid; grid-template-columns: minmax(78px, 1fr) 68px auto; align-items: center; gap: 7px; margin-top: 8px; }
+.bulk-row label { margin: 0; font-size: 11px; }
+.bulk-row input { padding: 7px 8px; }
+.check-row { display: flex; gap: 9px; align-items: flex-start; cursor: pointer; margin: 0; }
+.check-row input { margin: 2px 0 0; accent-color: #176f93; }
+.check-row span { font-size: 12px; }
+.editor-card form { margin-top: 11px; }
+.form-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 13px; }
+.actions { display: flex; align-items: center; gap: 7px; min-height: 38px; }
+button { min-height: 34px; border: 0; border-radius: 8px; padding: 0 12px; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
+button:disabled { cursor: default; opacity: .45; }
+.primary { color: white; background: #176f93; }
+.primary:hover:not(:disabled) { background: #105b7b; }
+.secondary { color: #273a48; background: #e7edf2; }
+.secondary:hover:not(:disabled) { background: #d9e2e9; }
+.text-button { min-height: 25px; padding: 3px 5px; color: #557080; background: transparent; font-size: 10px; }
+.text-button:hover:not(:disabled) { color: #144f6b; background: #edf4f7; }
+.status { flex: 1; overflow: hidden; color: #62727d; font-size: 10px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.preview-card { min-width: 0; }
+.url-label { max-width: 58%; overflow: hidden; color: #667986; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.preview-wrap { min-height: 100px; margin-top: 10px; overflow: hidden; border: 1px solid #e2e8ed; border-radius: 8px; background: #eef3f6; }
+#screenPreview { display: block; width: 100%; height: auto; }
+.empty-preview { display: grid; min-height: 100px; padding: 14px; place-items: center; color: #87949d; font-size: 11px; text-align: center; }
+.ocr-details { margin-top: 9px; color: #52636f; font-size: 11px; }
+.ocr-details summary { cursor: pointer; font-weight: 650; }
+.ocr-details pre { max-height: 170px; overflow: auto; padding: 8px; border-radius: 6px; background: #f5f7f9; color: #3b4b56; font: 10px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-card { min-height: 100px; }
+.log { display: grid; gap: 8px; margin: 10px 0 0; padding-left: 22px; }
+.log li { padding-left: 2px; color: #52636f; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.log li strong { color: #22323d; }
+.log li.error { color: #a43a34; }
+.privacy { padding: 0 2px; color: #73818a; font-size: 10px; line-height: 1.45; }
+dialog { width: min(340px, calc(100% - 30px)); border: 1px solid #dce4ea; border-radius: 12px; padding: 17px; box-shadow: 0 18px 60px #14253635; }
+dialog::backdrop { background: #18273270; }
+dialog h2 { margin-bottom: 9px; font-size: 15px; }
+dialog p { color: #485b68; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+@media (max-width: 350px) {
+  .bulk-row { grid-template-columns: minmax(65px, 1fr) 60px; }
+  .bulk-row button { grid-column: 2; }
+  .target-topline { display: block; }
+  .target-actions { margin-top: 4px; }
+}

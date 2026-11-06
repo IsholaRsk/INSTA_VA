@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Agent visuel local</title>
+    <link rel="stylesheet" href="sidepanel.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="header">
+        <div class="eyebrow">CHROME · VISION LOCALE</div>
+        <h1>Cibles URL enregistrées</h1>
+        <p>Choisis les fiches à lancer. Pour chacune, le bot ouvre l’URL, clique sur le lien dont le libellé complet est indiqué, attend la redirection puis ferme son onglet.</p>
+      </header>
+
+      <section class="card target-list-card">
+        <div class="section-title list-heading">
+          <div><h2>Mes cibles</h2><span id="selectionSummary" class="selection-summary">Chargement…</span></div>
+          <div class="button-row">
+            <button id="selectAllTargets" class="text-button" type="button">Tout sélectionner</button>
+            <button id="clearSelection" class="text-button" type="button">Aucune</button>
+          </div>
+        </div>
+        <p id="emptyTargets" class="empty-targets" hidden>Aucune cible enregistrée. Ajoute une fiche ci-dessous.</p>
+        <div id="targetList" class="target-list" aria-live="polite"></div>
+      </section>
+
+      <section class="card bulk-card">
+        <div class="section-title"><h2>Raccourcis communs</h2></div>
+        <p class="hint">Ces boutons appliquent la valeur à toutes les fiches enregistrées; les tirages ±10 restent indépendants par cible.</p>
+        <div class="bulk-row">
+          <label for="commonExecutionCount">Nombre cible</label>
+          <input id="commonExecutionCount" type="number" min="1" max="50" step="1" value="10">
+          <button id="applyCountToAll" class="secondary" type="button">Appliquer à toutes</button>
+        </div>
+        <div class="bulk-row">
+          <label for="commonDurationDays">Durée (jours)</label>
+          <input id="commonDurationDays" type="number" min="1" max="30" step="1" value="2">
+          <button id="applyDurationToAll" class="secondary" type="button">Appliquer à toutes</button>
+        </div>
+      </section>
+
+      <section class="card editor-card">
+        <div class="section-title">
+          <h2 id="formTitle">Ajouter une cible</h2>
+          <button id="cancelEdit" class="text-button" type="button" hidden>Annuler</button>
+        </div>
+        <form id="targetForm">
+          <label for="targetPseudo">Pseudo / nom de la cible</label>
+          <input id="targetPseudo" type="text" maxlength="60" required placeholder="Ex. Boutique A">
+
+          <label for="targetUrl" class="space-top">URL cible</label>
+          <input id="targetUrl" type="text" maxlength="2048" required spellcheck="false" placeholder="https://exemple.com/page">
+
+          <label for="targetLinkLabel" class="space-top">Libellé complet du lien <span>(facultatif)</span></label>
+          <input id="targetLinkLabel" type="text" maxlength="100" spellcheck="false" placeholder="Ex. Continuer vers la boutique">
+          <p class="hint">Le libellé doit correspondre au texte complet d’un lien visible. S’il est absent, introuvable ou ambigu, aucun clic n’est fait; l’onglet est fermé après la redirection.</p>
+
+          <div class="number-grid space-top">
+            <div>
+              <label for="targetExecutionCount">Nombre visé</label>
+              <input id="targetExecutionCount" type="number" min="1" max="50" step="1" value="10" required>
+            </div>
+            <div>
+              <label for="targetDurationDays">Durée (jours)</label>
+              <input id="targetDurationDays" type="number" min="1" max="30" step="1" value="2" required>
+            </div>
+          </div>
+          <p class="hint">Le total réel est tiré parmi les entiers de max(1, N−10) à N+10. La première exécution commence au lancement; les suivantes ont des intervalles aléatoires sur la durée indiquée.</p>
+          <div class="form-actions">
+            <button id="saveTarget" class="primary" type="submit">Enregistrer la cible</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card options-card">
+        <label for="ocrLanguage">Langue OCR locale</label>
+        <select id="ocrLanguage">
+          <option value="fra+eng" selected>Français + English</option>
+          <option value="fra">Français</option>
+          <option value="eng">English</option>
+        </select>
+        <label class="check-row">
+          <input id="confirmClicks" type="checkbox" checked>
+          <span>Confirmer chaque clic avant de l’exécuter</span>
+        </label>
+      </section>
+
+      <section class="actions">
+        <button id="startButton" class="primary" type="button">Lancer la sélection</button>
+        <button id="stopButton" class="secondary" type="button" disabled>Arrêter</button>
+        <span id="status" class="status" role="status" aria-live="polite">Chargement…</span>
+      </section>
+
+      <section class="card preview-card">
+        <div class="section-title"><h2>Écran observé</h2><span id="currentUrl" class="url-label">Aucun onglet</span></div>
+        <div class="preview-wrap">
+          <img id="screenPreview" alt="Capture de la page actuellement traitée" hidden>
+          <div id="previewEmpty" class="empty-preview">La capture de la page apparaîtra ici pendant le traitement.</div>
+        </div>
+        <details class="ocr-details">
+          <summary>Texte reconnu localement</summary>
+          <pre id="ocrText">Aucun texte reconnu pour l’instant.</pre>
+        </details>
+      </section>
+
+      <section class="card log-card">
+        <div class="section-title"><h2>Résultats</h2><button id="clearLog" class="text-button" type="button">Effacer</button></div>
+        <ol id="log" class="log"></ol>
+      </section>
+
+      <footer class="privacy">
+        Les fiches pseudo/URL sont conservées dans le stockage local de cette extension. Aucun compte API ni service distant : l’OCR et les captures restent dans Chrome. Garde le panneau ouvert pendant la planification; sa fermeture arrête la série.
+      </footer>
+    </main>
+
+    <dialog id="confirmDialog">
+      <form method="dialog" id="confirmForm">
+        <h2>Confirmer le clic</h2>
+        <p id="confirmText"></p>
+        <div class="dialog-actions">
+          <button id="confirmNo" value="no" class="secondary">Ignorer</button>
+          <button id="confirmYes" value="yes" class="primary">Cliquer</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="vendor/tesseract.min.js"></script>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>
