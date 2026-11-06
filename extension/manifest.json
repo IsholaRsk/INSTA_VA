@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "Agent visuel local — cibles et redirections",
+  "version": "0.4.1",
+  "description": "Gère localement des cibles URL et clique sur les liens visibles dont le libellé complet est fourni.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "debugger",
+    "sidePanel",
+    "storage",
+    "tabs",
+    "webNavigation"
+  ],
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "action": {
+    "default_title": "Ouvrir l'agent visuel local"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self';"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "vendor/worker.min.js",
+        "vendor/tesseract-core-*.wasm.js",
+        "vendor/tesseract-core-*.wasm",
+        "vendor/lang-data/*"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
