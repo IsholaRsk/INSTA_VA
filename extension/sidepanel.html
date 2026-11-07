@@ -81,6 +81,7 @@
           <option value="fra">Français</option>
           <option value="eng">English</option>
         </select>
+        <p class="hint" id="ocrWorkerStatus">Le moteur OCR (Tesseract.js/WASM) est inclus dans l’extension et démarre au premier cycle.</p>
         <label class="check-row">
           <input id="confirmClicks" type="checkbox" checked>
           <span>Confirmer chaque clic avant de l’exécuter</span>
@@ -89,37 +90,82 @@
       </section>
 
       <section class="card proxy-card">
-        <div class="section-title"><h2>Proxy Webshare rotatif</h2></div>
+        <div class="section-title">
+          <h2>Proxys Webshare</h2>
+          <span id="proxySummary" class="selection-summary">Chargement…</span>
+        </div>
         <label class="check-row proxy-toggle">
           <input id="useRotatingProxy" type="checkbox" checked>
-          <span>Utiliser Webshare pour le clic et sa redirection</span>
+          <span>Utiliser la liste des proxys pour le clic et sa redirection</span>
         </label>
-        <div class="proxy-grid">
-          <div class="proxy-field-wide">
-            <label for="proxyHost">Hôte du gateway</label>
-            <input id="proxyHost" type="text" maxlength="253" spellcheck="false" autocomplete="off" placeholder="Hôte affiché dans ton compte Webshare">
-          </div>
-          <div>
-            <label for="proxyPort">Port</label>
-            <input id="proxyPort" type="number" min="1" max="65535" step="1" placeholder="Port">
-          </div>
-          <div>
-            <label for="proxyScheme">Protocole</label>
-            <select id="proxyScheme">
-              <option value="http" selected>HTTP</option>
-              <option value="https">HTTPS</option>
-            </select>
-          </div>
-          <div class="proxy-field-wide">
-            <label for="proxyUsername">Nom d’utilisateur Webshare</label>
-            <input id="proxyUsername" type="text" maxlength="512" autocomplete="off" spellcheck="false">
-          </div>
-          <div class="proxy-field-wide">
-            <label for="proxyPassword">Mot de passe Webshare</label>
-            <input id="proxyPassword" type="password" maxlength="512" autocomplete="new-password">
-          </div>
+        <div class="proxy-mode-row">
+          <label for="proxyRotationMode">Rotation entre les proxys activés</label>
+          <select id="proxyRotationMode">
+            <option value="round-robin" selected>Dans l’ordre (1, 2, 3…)</option>
+            <option value="random">Au hasard</option>
+          </select>
         </div>
-        <p class="hint">Renseigne les valeurs fournies dans ton compte Webshare. Le gateway est activé juste avant le clic, puis le réglage proxy précédent est restauré après stabilisation de la redirection. Chrome applique toutefois le proxy à tout le profil pendant cette fenêtre; d’autres onglets peuvent donc aussi l’utiliser. Les identifiants sont gardés en stockage de session Chrome pendant l’exécution et ne sont pas ajoutés aux logs.</p>
+        <label class="check-row">
+          <input id="autoDisableProxy" type="checkbox" checked>
+          <span>Désactiver un proxy après 3 échecs consécutifs</span>
+        </label>
+
+        <p id="emptyProxies" class="empty-targets" hidden>Aucun proxy enregistré. Colle une liste Webshare ci-dessous.</p>
+        <div id="proxyList" class="proxy-list" aria-live="polite"></div>
+
+        <form id="proxyForm" class="proxy-editor">
+          <h3 id="proxyFormTitle">Ajouter un proxy</h3>
+          <div class="proxy-grid">
+            <div class="proxy-field-wide">
+              <label for="proxyHost">Hôte</label>
+              <input id="proxyHost" type="text" maxlength="253" spellcheck="false" autocomplete="off" placeholder="proxy.webshare.io">
+            </div>
+            <div>
+              <label for="proxyPort">Port</label>
+              <input id="proxyPort" type="number" min="1" max="65535" step="1" placeholder="8000">
+            </div>
+            <div>
+              <label for="proxyScheme">Protocole</label>
+              <select id="proxyScheme">
+                <option value="http" selected>HTTP</option>
+                <option value="https">HTTPS</option>
+                <option value="socks5">SOCKS5</option>
+              </select>
+            </div>
+            <div class="proxy-field-wide">
+              <label for="proxyUsername">Nom d’utilisateur</label>
+              <input id="proxyUsername" type="text" maxlength="512" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="proxy-field-wide">
+              <label for="proxyPassword">Mot de passe</label>
+              <input id="proxyPassword" type="password" maxlength="512" autocomplete="new-password">
+            </div>
+          </div>
+          <div class="form-actions">
+            <button id="cancelProxyEdit" class="text-button" type="button" hidden>Annuler</button>
+            <button id="saveProxy" class="primary" type="submit">Ajouter à la liste</button>
+          </div>
+        </form>
+
+        <form id="proxyImportForm" class="proxy-import">
+          <label for="proxyImportLines">Import en masse <span>(un proxy par ligne, séparateur « , » ou « ; » accepté)</span></label>
+          <textarea id="proxyImportLines" rows="4" spellcheck="false" placeholder="proxy.webshare.io:8000:user:pass&#10;user:pass@203.0.113.9:9000&#10;proxy2.webshare.io:8001"></textarea>
+          <div class="proxy-grid">
+            <div class="proxy-field-wide">
+              <label for="proxyDefaultUsername">Identifiant commun <span>(si absent des lignes)</span></label>
+              <input id="proxyDefaultUsername" type="text" maxlength="512" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="proxy-field-wide">
+              <label for="proxyDefaultPassword">Mot de passe commun</label>
+              <input id="proxyDefaultPassword" type="password" maxlength="512" autocomplete="new-password">
+            </div>
+          </div>
+          <div class="form-actions">
+            <button id="importProxies" class="secondary" type="submit">Importer la liste</button>
+          </div>
+        </form>
+
+        <p class="hint">Formats acceptés : <code>host:port:user:pass</code>, <code>user:pass@host:port</code> ou <code>host:port</code> avec les identifiants communs. Le proxy activé est appliqué juste avant le clic, puis le réglage Chrome précédent est restauré après la redirection; Chrome l’applique à tout le profil pendant cette fenêtre. Les identifiants restent dans <code>chrome.storage.local</code> sur cet appareil, ne partent jamais vers un serveur et ne sont pas écrits dans les logs.</p>
       </section>
 
       <section class="actions">
@@ -146,7 +192,7 @@
       </section>
 
       <footer class="privacy">
-        Les fiches et l’OCR restent dans Chrome. Si Webshare est activé, le clic et sa redirection passent par le gateway; ses identifiants restent en stockage de session pendant l’exécution. Le proxy s’applique temporairement à tout le profil Chrome. Garde le panneau ouvert pendant la planification; sa fermeture arrête la série.
+        Les fiches, la liste des proxys et l’OCR restent dans Chrome. Un proxy de la liste est appliqué à chaque cycle et le réglage Chrome précédent est restauré juste après; les identifiants ne sont chargés en stockage de session que pendant l’exécution. Chrome applique le proxy à tout le profil pendant cette fenêtre. Garde le panneau ouvert pendant la planification; sa fermeture arrête la série.
       </footer>
     </main>
 
@@ -162,6 +208,7 @@
     </dialog>
 
     <script src="vendor/tesseract.min.js"></script>
+    <script src="bot-utils.js"></script>
     <script src="sidepanel.js"></script>
   </body>
 </html>

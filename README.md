@@ -6,6 +6,8 @@ Une PWA distincte est fournie pour l’utilisation depuis l’écran d’accueil
 
 Le moteur Tesseract.js/WASM et les données française/anglaise sont inclus dans `extension/vendor/`. Les captures et l’OCR restent dans Chrome. L’extension ne lance pas de navigateur séparé et n’exige pas de port de débogage.
 
+Les proxys Webshare ne sont plus limités à une seule entrée : le panneau enregistre une **liste** de proxys (jusqu’à 100), l’active ou la désactive ligne par ligne et applique un proxy différent à chaque cycle, dans l’ordre ou au hasard.
+
 ## Installation
 
 1. Ouvre `chrome://extensions` dans le Chrome à piloter.
@@ -19,14 +21,14 @@ Le moteur Tesseract.js/WASM et les données française/anglaise sont inclus dans
 1. Crée jusqu’à 50 fiches, une par cible, avec un pseudo/alias, une URL HTTP(S), le libellé complet du lien à cliquer, un nombre visé et une durée de 1 à 52 semaines. Tu n’as pas à ajouter ni ordonner des étapes. Les fiches peuvent être consultées, modifiées ou supprimées.
 2. À chaque cycle, le bot ouvre l’URL enregistrée et attend la fin du chargement puis la stabilisation de la page. Il cherche un lien visible unique (`a[href]` ou rôle `link`) dont le libellé correspond au texte fourni (casse, accents et espaces normalisés), clique une fois, attend la stabilisation de la redirection et ferme l’onglet temporaire. Si le lien est absent ou ambigu, il ne clique pas. L’OCR reste local.
 3. Les champs **Nombre visé** et **Durée (semaines)** définissent le mode intervalle indépendamment pour chaque cible. Les raccourcis **Appliquer à toutes** permettent d’utiliser les mêmes valeurs pour toutes les fiches enregistrées.
-4. L’option **Proxy Webshare rotatif** est activée par défaut. Pour l’utiliser, renseigne l’hôte, le port, le protocole et les identifiants indiqués dans ton compte Webshare; ils ne sont conservés que dans le stockage de session pendant l’exécution. Décoche l’option pour utiliser le réglage proxy déjà configuré dans Chrome.
+4. La section **Proxys Webshare** remplace l’ancien formulaire unique. Ajoute un proxy à la main (hôte, port, protocole, identifiants) ou colle une liste entière dans **Import en masse**, une ligne par proxy. Formats acceptés : `host:port:user:pass`, `user:pass@host:port`, `socks5://user:pass@host:port` ou simplement `host:port` lorsque tu renseignes l’identifiant et le mot de passe communs sous la zone d’import. Les doublons, les lignes vides, les commentaires `#` et les hôtes locaux ou privés sont ignorés avec un compte rendu. Chaque ligne affiche son état, ses compteurs (cycles, succès, échecs) et le résultat du bouton **Tester** (IP de sortie observée). Décoche **Utiliser la liste des proxys** pour revenir au réglage proxy déjà configuré dans Chrome.
 5. Coche les cibles voulues puis clique **Lancer la sélection**. Chaque cible a son propre tirage de nombre et sa propre durée; les cycles de plusieurs cibles sont intercalés selon leurs prochains horaires.
 
 Pour un nombre visé `N`, le total réel est tiré indépendamment pour chaque cible parmi les entiers de `max(1, N−10)` à `N+10`. La première exécution commence au lancement; les suivantes sont réparties aléatoirement sur la durée propre à cette cible (1 à 52 semaines), avec au moins 5 minutes entre ses exécutions. Les retards de navigation ou de confirmation peuvent décaler des horaires et faire dépasser la durée. La sélection est limitée à 300 visites potentielles au total, en comptant le pire cas `N+10` pour chaque cible.
 
 La confirmation avant chaque clic est activée par défaut; certains libellés sensibles (payer, envoyer, supprimer, publier…) restent toujours soumis à confirmation. La confirmation suspend le plan jusqu’à la réponse. Pour une série sans confirmation systématique, décoche cette option; les clics sensibles restent confirmés.
 
-Le gateway Webshare est activé juste avant le clic et le réglage proxy précédent est restauré après stabilisation de la redirection. `chrome.proxy` agit sur tout le profil Chrome pendant cette fenêtre, pas uniquement sur l’onglet temporaire; d’autres onglets peuvent donc aussi passer par Webshare. Le gateway Webshare applique sa propre rotation par requête/connexion : une page peut générer plusieurs connexions, donc l’extension ne peut garantir une IP de sortie distincte exactement par clic. Les identifiants ne sont pas écrits dans `chrome.storage.local` ni dans les logs; ils restent dans `chrome.storage.session` jusqu’à la fin de la série. Le trafic routé passe par le fournisseur Webshare.
+Le proxy du cycle est activé avant l’ouverture de l’URL et reste appliqué pendant le chargement, le clic et la redirection; le réglage proxy précédent de Chrome est restauré à la fin de chaque cycle. `chrome.proxy` agit sur tout le profil Chrome pendant cette fenêtre, pas uniquement sur l’onglet temporaire; d’autres onglets peuvent donc aussi passer par Webshare. Le fournisseur applique sa propre rotation par requête/connexion : une page peut générer plusieurs connexions, donc l’extension ne peut garantir une IP de sortie distincte exactement par clic. Chaque cycle tire le proxy suivant de la liste des proxys **activés** : `dans l’ordre` parcourt la liste puis recommence, `au hasard` tire à chaque fois. Un cycle réussi ou échoué à cause du réseau incrémente les compteurs du proxy; après trois échecs consécutifs, le proxy est automatiquement désactivé et signalé dans la liste (option désactivable). Un cycle sans clic (lien introuvable, ambigu ou ignoré) n’est pas imputé au proxy. Les identifiants restent dans `chrome.storage.local` sur cet appareil, sont chargés dans `chrome.storage.session` juste avant chaque cycle et effacés à la fin de la série; ils ne sont jamais écrits dans les logs. Le trafic routé passe par le fournisseur Webshare.
 
 ## Limites et confidentialité
 
@@ -34,7 +36,9 @@ Tesseract est un moteur OCR, pas un modèle de raisonnement. La détection du li
 
 Les fiches persistent localement, mais la planification en cours n’est pas enregistrée comme une alarme d’arrière-plan. Garde Chrome et le panneau latéral ouverts : fermer le panneau ou Chrome arrête la série, sans reprise automatique. Les onglets Chrome préexistants restent ouverts; seuls les onglets temporaires créés par l’extension sont fermés.
 
-Les fichiers OCR tiers et leurs licences sont dans `extension/vendor/`.
+Le worker Tesseract.js est démarré à la demande par `ensureOcrWorker()`, servi exclusivement depuis `extension/vendor/` (`worker.min.js`, `tesseract-core-*-lstm.wasm.js`, `lang-data/*.traineddata.gz`) : aucune requête réseau, aucune ressource distante. Le worker est arrêté à la fin de chaque exécution et à la fin de la série. L’OCR relit la capture d’écran pour corroborer la position du lien (journal **OCR concordant**/**OCR sans correspondance**) mais ne décide jamais seul du clic : la détection DOM exacte reste la référence. Si le worker ne peut pas démarrer, le cycle continue et l’erreur est journalisée. Les fichiers OCR tiers et leurs licences sont dans `extension/vendor/`.
+
+Les tests Node couvrent la liste de proxys (analyse des lignes, import, rotation, compteurs, désactivation automatique), la configuration du worker OCR et la cohérence du câblage de l’extension (appel de fonction non déclarée, identifiants HTML, chargement des scripts, ressources du manifeste) : `npm test`.
 
 ## Adaptation mobile (iPhone et Android)
 
