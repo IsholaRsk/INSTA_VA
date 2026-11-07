@@ -11,7 +11,7 @@
       <header class="header">
         <div class="eyebrow">CHROME · VISION LOCALE</div>
         <h1>Cibles URL enregistrées</h1>
-        <p>Choisis les fiches à lancer. Pour chacune, le bot ouvre l’URL, clique sur le lien dont le libellé complet est indiqué, attend la redirection puis ferme son onglet.</p>
+        <p>Pour chaque cible, le bot suit toujours le même cycle : ouvrir l’URL, cliquer sur le lien indiqué, attendre la redirection puis recommencer selon le mode intervalle. Aucun workflow à construire.</p>
       </header>
 
       <section class="card target-list-card">
@@ -27,7 +27,7 @@
       </section>
 
       <section class="card bulk-card">
-        <div class="section-title"><h2>Raccourcis communs</h2></div>
+        <div class="section-title"><h2>Mode intervalle · réglages communs</h2></div>
         <p class="hint">Ces boutons appliquent la valeur à toutes les fiches enregistrées; les tirages ±10 restent indépendants par cible.</p>
         <div class="bulk-row">
           <label for="commonExecutionCount">Nombre cible</label>
@@ -35,8 +35,8 @@
           <button id="applyCountToAll" class="secondary" type="button">Appliquer à toutes</button>
         </div>
         <div class="bulk-row">
-          <label for="commonDurationDays">Durée (jours)</label>
-          <input id="commonDurationDays" type="number" min="1" max="30" step="1" value="2">
+          <label for="commonDurationWeeks">Durée (semaines)</label>
+          <input id="commonDurationWeeks" type="number" min="1" max="52" step="1" value="2">
           <button id="applyDurationToAll" class="secondary" type="button">Appliquer à toutes</button>
         </div>
       </section>
@@ -53,9 +53,9 @@
           <label for="targetUrl" class="space-top">URL cible</label>
           <input id="targetUrl" type="text" maxlength="2048" required spellcheck="false" placeholder="https://exemple.com/page">
 
-          <label for="targetLinkLabel" class="space-top">Libellé complet du lien <span>(facultatif)</span></label>
-          <input id="targetLinkLabel" type="text" maxlength="100" spellcheck="false" placeholder="Ex. Continuer vers la boutique">
-          <p class="hint">Le libellé doit correspondre au texte complet d’un lien visible. S’il est absent, introuvable ou ambigu, aucun clic n’est fait; l’onglet est fermé après la redirection.</p>
+          <label for="targetLinkLabel" class="space-top">Libellé exact du lien à cliquer</label>
+          <input id="targetLinkLabel" type="text" maxlength="100" required spellcheck="false" placeholder="Ex. Continuer vers la boutique">
+          <p class="hint">Indique le texte complet du lien visible sur la page. Le cycle est fixe : ouverture et stabilisation de l’URL, un clic sur le lien unique correspondant, puis attente de la redirection. Tu n’as pas à définir d’autres étapes.</p>
 
           <div class="number-grid space-top">
             <div>
@@ -63,11 +63,11 @@
               <input id="targetExecutionCount" type="number" min="1" max="50" step="1" value="10" required>
             </div>
             <div>
-              <label for="targetDurationDays">Durée (jours)</label>
-              <input id="targetDurationDays" type="number" min="1" max="30" step="1" value="2" required>
+              <label for="targetDurationWeeks">Durée (semaines)</label>
+              <input id="targetDurationWeeks" type="number" min="1" max="52" step="1" value="2" required>
             </div>
           </div>
-          <p class="hint">Le total réel est tiré parmi les entiers de max(1, N−10) à N+10. La première exécution commence au lancement; les suivantes ont des intervalles aléatoires sur la durée indiquée.</p>
+          <p class="hint">Le total réel est tiré parmi les entiers de max(1, N−10) à N+10. La première exécution commence au lancement; les suivantes sont réparties aléatoirement sur la durée propre à cette cible (1 à 52 semaines).</p>
           <div class="form-actions">
             <button id="saveTarget" class="primary" type="submit">Enregistrer la cible</button>
           </div>
@@ -85,6 +85,41 @@
           <input id="confirmClicks" type="checkbox" checked>
           <span>Confirmer chaque clic avant de l’exécuter</span>
         </label>
+        <p class="hint">La confirmation est activée par défaut. Décoche-la pour laisser les cycles du mode intervalle s’enchaîner sans pause; les libellés sensibles restent toujours soumis à confirmation.</p>
+      </section>
+
+      <section class="card proxy-card">
+        <div class="section-title"><h2>Proxy Webshare rotatif</h2></div>
+        <label class="check-row proxy-toggle">
+          <input id="useRotatingProxy" type="checkbox" checked>
+          <span>Utiliser Webshare pour le clic et sa redirection</span>
+        </label>
+        <div class="proxy-grid">
+          <div class="proxy-field-wide">
+            <label for="proxyHost">Hôte du gateway</label>
+            <input id="proxyHost" type="text" maxlength="253" spellcheck="false" autocomplete="off" placeholder="Hôte affiché dans ton compte Webshare">
+          </div>
+          <div>
+            <label for="proxyPort">Port</label>
+            <input id="proxyPort" type="number" min="1" max="65535" step="1" placeholder="Port">
+          </div>
+          <div>
+            <label for="proxyScheme">Protocole</label>
+            <select id="proxyScheme">
+              <option value="http" selected>HTTP</option>
+              <option value="https">HTTPS</option>
+            </select>
+          </div>
+          <div class="proxy-field-wide">
+            <label for="proxyUsername">Nom d’utilisateur Webshare</label>
+            <input id="proxyUsername" type="text" maxlength="512" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="proxy-field-wide">
+            <label for="proxyPassword">Mot de passe Webshare</label>
+            <input id="proxyPassword" type="password" maxlength="512" autocomplete="new-password">
+          </div>
+        </div>
+        <p class="hint">Renseigne les valeurs fournies dans ton compte Webshare. Le gateway est activé juste avant le clic, puis le réglage proxy précédent est restauré après stabilisation de la redirection. Chrome applique toutefois le proxy à tout le profil pendant cette fenêtre; d’autres onglets peuvent donc aussi l’utiliser. Les identifiants sont gardés en stockage de session Chrome pendant l’exécution et ne sont pas ajoutés aux logs.</p>
       </section>
 
       <section class="actions">
@@ -111,7 +146,7 @@
       </section>
 
       <footer class="privacy">
-        Les fiches pseudo/URL sont conservées dans le stockage local de cette extension. Aucun compte API ni service distant : l’OCR et les captures restent dans Chrome. Garde le panneau ouvert pendant la planification; sa fermeture arrête la série.
+        Les fiches et l’OCR restent dans Chrome. Si Webshare est activé, le clic et sa redirection passent par le gateway; ses identifiants restent en stockage de session pendant l’exécution. Le proxy s’applique temporairement à tout le profil Chrome. Garde le panneau ouvert pendant la planification; sa fermeture arrête la série.
       </footer>
     </main>
 

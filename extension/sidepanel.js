@@ -1,10 +1,12 @@
 const STORAGE_KEY = "savedTargets";
 const MAX_SAVED_TARGETS = 50;
 const MAX_TARGET_EXECUTIONS = 50;
-const MAX_TARGET_DURATION_DAYS = 30;
+const MAX_TARGET_DURATION_WEEKS = 52;
 const MAX_SCHEDULED_VISITS = 300;
+const PROXY_RECOVERY_KEY = "temporaryProxyRecovery";
+const PROXY_AUTH_SESSION_KEY = "temporaryProxyAuth";
 const MIN_SCHEDULE_INTERVAL_MS = 5 * 60 * 1000;
-const DAY_MS = 24 * 60 * 60 * 1000;
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const VIEWPORT = { width: 1280, height: 800 };
 const REDIRECT_QUIET_MS = 2500;
 const REDIRECT_MAX_WAIT_MS = 15000;
@@ -20,9 +22,15 @@ const targetPseudoInput = $("targetPseudo");
 const targetUrlInput = $("targetUrl");
 const targetLinkLabelInput = $("targetLinkLabel");
 const targetExecutionCountInput = $("targetExecutionCount");
-const targetDurationDaysInput = $("targetDurationDays");
+const targetDurationWeeksInput = $("targetDurationWeeks");
 const commonExecutionCountInput = $("commonExecutionCount");
-const commonDurationDaysInput = $("commonDurationDays");
+const commonDurationWeeksInput = $("commonDurationWeeks");
+const useRotatingProxyInput = $("useRotatingProxy");
+const proxyHostInput = $("proxyHost");
+const proxyPortInput = $("proxyPort");
+const proxySchemeInput = $("proxyScheme");
+const proxyUsernameInput = $("proxyUsername");
+const proxyPasswordInput = $("proxyPassword");
 const formTitle = $("formTitle");
 const saveTargetButton = $("saveTarget");
 const cancelEditButton = $("cancelEdit");
@@ -45,9 +53,15 @@ const runConfigurationInputs = [
   targetUrlInput,
   targetLinkLabelInput,
   targetExecutionCountInput,
-  targetDurationDaysInput,
+  targetDurationWeeksInput,
   commonExecutionCountInput,
-  commonDurationDaysInput,
+  commonDurationWeeksInput,
+  useRotatingProxyInput,
+  proxyHostInput,
+  proxyPortInput,
+  proxySchemeInput,
+  proxyUsernameInput,
+  proxyPasswordInput,
   languageInput,
   confirmClicksInput,
 ];
@@ -67,7 +81,7 @@ cancelEditButton.addEventListener("click", clearTargetForm);
 selectAllTargetsButton.addEventListener("click", selectAllTargets);
 clearSelectionButton.addEventListener("click", clearTargetSelection);
 applyCountToAllButton.addEventListener("click", () => applyCommonValue("executionTarget"));
-applyDurationToAllButton.addEventListener("click", () => applyCommonValue("durationDays"));
+applyDurationToAllButton.addEventListener("click", () => applyCommonValue("durationWeeks"));
 startButton.addEventListener("click", startRun);
 stopButton.addEventListener("click", () => {
   stopRequested = true;
@@ -78,6 +92,7 @@ stopButton.addEventListener("click", () => {
 window.addEventListener("pagehide", () => {
   stopRequested = true;
   if (activeTabId !== null) chromeCall(chrome.tabs.remove, activeTabId).catch(() => {});
+  chrome.runtime.sendMessage({ type: "restore-temporary-proxy" }).catch(() => {});
 });
 
 initializeTargets();
@@ -87,7 +102,7 @@ async function initializeTargets() {
   startButton.disabled = true;
   setStatus("Chargement des cibles enregistrées…");
   try {
-    const result = await chromeCall(chrome.storage.local.get, STORAGE_KEY);
+    const result = await chrome.storage.local.get(STORAGE_KEY);
     const stored = result?.[STORAGE_KEY];
     savedTargets = Array.isArray(stored) ? stored.map(sanitizeSavedTarget).filter(Boolean) : [];
     renderTargetList();
@@ -96,6 +111,7 @@ async function initializeTargets() {
     savedTargets = [];
     renderTargetList();
     setStatus(`Impossible de charger le stockage local : ${error.message}`);
+    addLog("Chargement des cibles échoué", error.message, true);
   } finally {
     setConfigurationDisabled(false);
     updateSelectionSummary();
@@ -107,13 +123,19 @@ function sanitizeSavedTarget(raw) {
   try {
     const pseudo = String(raw.pseudo || "").trim();
     const url = normalizeTargetUrl(String(raw.url || ""));
-    const linkLabel = String(raw.linkLabel ?? raw.buttonLabel ?? "").trim();
+    const legacyClickStep = Array.isArray(raw.workflowSteps)
+      ? raw.workflowSteps.find((step) => step?.type === "click-link")
+      : null;
+    const rawLinkLabel = [raw.linkLabel, raw.buttonLabel, legacyClickStep?.label, legacyClickStep?.linkLabel]
+      .map((value) => String(value ?? "").trim())
+      .find(Boolean) || "";
+    const linkLabel = rawLinkLabel.length <= 100 ? rawLinkLabel : "";
     const executionTarget = Number(raw.executionTarget);
-    const durationDays = Number(raw.durationDays);
-    if (!pseudo || pseudo.length > 60 || linkLabel.length > 100) return null;
+    const durationWeeks = Number(raw.durationWeeks ?? (raw.durationDays != null ? Math.ceil(Number(raw.durationDays) / 7) : NaN));
+    if (!pseudo || pseudo.length > 60) return null;
     if (!Number.isInteger(executionTarget) || executionTarget < 1 || executionTarget > MAX_TARGET_EXECUTIONS) return null;
-    if (!Number.isInteger(durationDays) || durationDays < 1 || durationDays > MAX_TARGET_DURATION_DAYS) return null;
-    return { id: raw.id, pseudo, url, linkLabel, executionTarget, durationDays };
+    if (!Number.isInteger(durationWeeks) || durationWeeks < 1 || durationWeeks > MAX_TARGET_DURATION_WEEKS) return null;
+    return { id: raw.id, pseudo, url, linkLabel, executionTarget, durationWeeks };
   } catch {
     return null;
   }
@@ -155,7 +177,7 @@ function renderTargetList() {
     const bounds = getExecutionBounds(target.executionTarget);
     const meta = document.createElement("p");
     meta.className = "target-meta";
-    meta.textContent = `${target.url}\nLien : ${target.linkLabel || "aucun — attendre puis fermer"}\nExécutions : visée ${target.executionTarget}, tirage ${bounds.min}–${bounds.max} · Durée : ${target.durationDays} jour(s)`;
+    meta.textContent = `${target.url}\nLien à cliquer : ${target.linkLabel ? `« ${target.linkLabel} »` : "libellé à renseigner"}\nMode intervalle : visée ${target.executionTarget}, tirage ${bounds.min}–${bounds.max} · Durée : ${target.durationWeeks} semaine(s)`;
     content.append(topLine, meta);
     item.append(checkbox, content);
     if (checkbox.checked) item.classList.add("selected");
@@ -195,27 +217,37 @@ function clearTargetSelection() {
 async function saveTargetFromForm(event) {
   event.preventDefault();
   if (running) return;
+
+  const wasEditing = Boolean(editingTargetId);
+  let target;
   try {
-    const wasEditing = Boolean(editingTargetId);
-    const target = readTargetForm();
+    target = readTargetForm();
     const duplicate = savedTargets.find((item) =>
       item.id !== editingTargetId && item.pseudo.toLocaleLowerCase("fr") === target.pseudo.toLocaleLowerCase("fr"));
     if (duplicate) throw new Error("Ce pseudo est déjà utilisé par une autre cible.");
     if (!editingTargetId && savedTargets.length >= MAX_SAVED_TARGETS) {
       throw new Error(`Maximum ${MAX_SAVED_TARGETS} cibles enregistrées.`);
     }
-
-    const nextTargets = editingTargetId
-      ? savedTargets.map((item) => item.id === editingTargetId ? { ...item, ...target } : item)
-      : [...savedTargets, { id: crypto.randomUUID(), ...target }];
-    await persistTargets(nextTargets);
-    savedTargets = nextTargets;
-    clearTargetForm();
-    renderTargetList();
-    setStatus(wasEditing ? "Cible mise à jour." : "Cible enregistrée localement.");
   } catch (error) {
     setStatus(error.message);
+    return;
   }
+
+  const nextTargets = editingTargetId
+    ? savedTargets.map((item) => item.id === editingTargetId ? { ...item, ...target } : item)
+    : [...savedTargets, { id: crypto.randomUUID(), ...target }];
+  try {
+    await persistTargets(nextTargets);
+  } catch (error) {
+    setStatus(`Échec de l’enregistrement local : ${error.message}`);
+    addLog("Enregistrement de la cible échoué", error.message, true);
+    return;
+  }
+
+  savedTargets = nextTargets;
+  clearTargetForm();
+  renderTargetList();
+  setStatus(wasEditing ? "Cible mise à jour." : "Cible enregistrée localement.");
 }
 
 function readTargetForm() {
@@ -224,10 +256,27 @@ function readTargetForm() {
   if (pseudo.length > 60) throw new Error("Le pseudo doit faire 60 caractères maximum.");
   const url = normalizeTargetUrl(targetUrlInput.value);
   const linkLabel = targetLinkLabelInput.value.trim();
-  if (linkLabel.length > 100) throw new Error("Le libellé complet du lien doit faire 100 caractères maximum.");
+  if (!linkLabel || linkLabel.length > 100) {
+    throw new Error("Renseigne le libellé complet du lien à cliquer (1 à 100 caractères).");
+  }
   const executionTarget = readInteger(targetExecutionCountInput.value, 1, MAX_TARGET_EXECUTIONS, "Nombre visé");
-  const durationDays = readInteger(targetDurationDaysInput.value, 1, MAX_TARGET_DURATION_DAYS, "Durée");
-  return { pseudo, url, linkLabel, executionTarget, durationDays };
+  const durationWeeks = readInteger(targetDurationWeeksInput.value, 1, MAX_TARGET_DURATION_WEEKS, "Durée en semaines");
+  return { pseudo, url, linkLabel, executionTarget, durationWeeks };
+}
+
+function readProxyForm() {
+  const host = proxyHostInput.value.trim().replace(/\.$/, "").toLowerCase();
+  if (!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/.test(host)) {
+    throw new Error("Renseigne l’hôte Webshare sans protocole ni port (ex. proxy.exemple.com).");
+  }
+  const port = readInteger(proxyPortInput.value, 1, 65535, "Port du proxy");
+  const scheme = proxySchemeInput.value;
+  if (!["http", "https"].includes(scheme)) throw new Error("Choisis le protocole HTTP ou HTTPS du proxy.");
+  const username = proxyUsernameInput.value;
+  const password = proxyPasswordInput.value;
+  if (!username || !password) throw new Error("Renseigne le nom d’utilisateur et le mot de passe du proxy Webshare.");
+  if (username.length > 512 || password.length > 512) throw new Error("Les identifiants du proxy sont trop longs.");
+  return { host, port, scheme, username, password };
 }
 
 function readInteger(raw, minimum, maximum, label) {
@@ -254,7 +303,7 @@ function normalizeTargetUrl(raw) {
 }
 
 async function persistTargets(targets = savedTargets) {
-  await chromeCall(chrome.storage.local.set, { [STORAGE_KEY]: targets });
+  await chrome.storage.local.set({ [STORAGE_KEY]: targets });
 }
 
 function editTarget(id) {
@@ -266,7 +315,7 @@ function editTarget(id) {
   targetUrlInput.value = target.url;
   targetLinkLabelInput.value = target.linkLabel;
   targetExecutionCountInput.value = String(target.executionTarget);
-  targetDurationDaysInput.value = String(target.durationDays);
+  targetDurationWeeksInput.value = String(target.durationWeeks);
   formTitle.textContent = "Modifier une cible";
   saveTargetButton.textContent = "Enregistrer les modifications";
   cancelEditButton.hidden = false;
@@ -309,7 +358,7 @@ async function applyCommonValue(field) {
   try {
     const value = isCount
       ? readInteger(commonExecutionCountInput.value, 1, MAX_TARGET_EXECUTIONS, "Nombre cible commun")
-      : readInteger(commonDurationDaysInput.value, 1, MAX_TARGET_DURATION_DAYS, "Durée commune");
+      : readInteger(commonDurationWeeksInput.value, 1, MAX_TARGET_DURATION_WEEKS, "Durée commune en semaines");
     const nextTargets = savedTargets.map((target) => ({ ...target, [field]: value }));
     await persistTargets(nextTargets);
     savedTargets = nextTargets;
@@ -317,7 +366,7 @@ async function applyCommonValue(field) {
       const edited = savedTargets.find((target) => target.id === editingTargetId);
       if (edited) {
         if (isCount) targetExecutionCountInput.value = String(value);
-        else targetDurationDaysInput.value = String(value);
+        else targetDurationWeeksInput.value = String(value);
       }
     }
     renderTargetList();
@@ -329,6 +378,11 @@ async function applyCommonValue(field) {
 
 async function startRun() {
   if (running) return;
+  try { await restoreTemporaryProxyIfNeeded(); }
+  catch (error) {
+    setStatus(`Impossible de rétablir le proxy Chrome : ${error.message}`);
+    return;
+  }
   const selectedTargets = savedTargets.filter((target) => selectedTargetIds.has(target.id));
   if (!selectedTargets.length) {
     setStatus("Sélectionne au moins une cible enregistrée.");
@@ -336,16 +390,21 @@ async function startRun() {
   }
 
   let totalWorstCaseVisits = 0;
+  let rotatingProxyConfig = null;
   try {
     for (const target of selectedTargets) {
       normalizeTargetUrl(target.url);
+      if (!String(target.linkLabel || "").trim() || target.linkLabel.length > 100) {
+        throw new Error(`Renseigne le libellé exact du lien à cliquer pour « ${target.pseudo} ».`);
+      }
       readInteger(target.executionTarget, 1, MAX_TARGET_EXECUTIONS, `Nombre visé pour ${target.pseudo}`);
-      readInteger(target.durationDays, 1, MAX_TARGET_DURATION_DAYS, `Durée pour ${target.pseudo}`);
+      readInteger(target.durationWeeks, 1, MAX_TARGET_DURATION_WEEKS, `Durée en semaines pour ${target.pseudo}`);
       totalWorstCaseVisits += target.executionTarget + 10;
     }
     if (totalWorstCaseVisits > MAX_SCHEDULED_VISITS) {
       throw new Error(`La sélection pourrait dépasser ${MAX_SCHEDULED_VISITS} visites de pages au total. Réduis le nombre visé ou la sélection.`);
     }
+    if (useRotatingProxyInput.checked) rotatingProxyConfig = readProxyForm();
   } catch (error) {
     setStatus(error.message);
     return;
@@ -357,12 +416,24 @@ async function startRun() {
   startButton.disabled = true;
   stopButton.disabled = false;
   logNode.replaceChildren();
-  ocrTextNode.textContent = "L’OCR local ne sera chargé que pour les cibles ayant un libellé de lien.";
+  ocrTextNode.textContent = "L’OCR local vérifiera le lien à cliquer pendant chaque cycle.";
 
   let totalFailures = 0;
   let completedRuns = 0;
   let totalRuns = 0;
   try {
+    if (rotatingProxyConfig) {
+      const { host, port, username, password } = rotatingProxyConfig;
+      const proxyControl = await chrome.proxy.settings.get({ incognito: false });
+      if (!["controllable_by_this_extension", "controlled_by_this_extension"].includes(proxyControl.levelOfControl)) {
+        throw new Error("Les paramètres proxy de Chrome sont contrôlés ailleurs ou indisponibles; aucun onglet ne sera ouvert.");
+      }
+      await chrome.storage.session.set({ [PROXY_AUTH_SESSION_KEY]: { host, port, username, password } });
+      addLog("Proxy Webshare prêt", `Le gateway sera activé uniquement autour des clics de lien et de leur redirection (${host}:${port}).`);
+    } else {
+      await chrome.storage.session.remove(PROXY_AUTH_SESSION_KEY);
+      addLog("Proxy Webshare désactivé", "Les cycles utiliseront le réglage proxy actuellement configuré dans Chrome.");
+    }
     const focusedTabs = await chromeCall(chrome.tabs.query, { active: true, lastFocusedWindow: true });
     const windowId = focusedTabs[0]?.windowId;
     const startAt = Date.now();
@@ -372,7 +443,7 @@ async function startRun() {
       const bounds = getExecutionBounds(plan.target.executionTarget);
       addLog(
         `Planifiée · ${plan.target.pseudo}`,
-        `${plan.count} exécution(s) tirée(s) entre ${bounds.min} et ${bounds.max} (cible ${plan.target.executionTarget} ±10); durée propre : ${plan.target.durationDays} jour(s); ${plan.target.linkLabel ? `lien exact « ${plan.target.linkLabel} »` : "aucun libellé, attente puis fermeture"}.`,
+        `${plan.count} cycle(s) tiré(s) entre ${bounds.min} et ${bounds.max} (cible ${plan.target.executionTarget} ±10); durée propre : ${plan.target.durationWeeks} semaine(s); cycle fixe : ouvrir → stabiliser → cliquer « ${plan.target.linkLabel} » → attendre la redirection.`,
       );
     }
 
@@ -389,7 +460,7 @@ async function startRun() {
 
       addLog(`${plan.target.pseudo} · exécution ${runNumber}/${plan.count}`, `Début : ${new Date().toLocaleString()}`);
       try {
-        await executeTargetRun(plan.target, runNumber, plan.count, windowId);
+        await executeTargetRun(plan.target, runNumber, plan.count, windowId, rotatingProxyConfig);
       } catch (error) {
         if (stopRequested) break;
         totalFailures += 1;
@@ -416,6 +487,14 @@ async function startRun() {
     }
     ocrWorker = null;
     loadedLanguage = "";
+    try { await chrome.storage.session.remove(PROXY_AUTH_SESSION_KEY); }
+    catch (error) { addLog("Nettoyage des identifiants proxy échoué", error.message, true); }
+    if (rotatingProxyConfig) {
+      rotatingProxyConfig.username = "";
+      rotatingProxyConfig.password = "";
+    }
+    proxyUsernameInput.value = "";
+    proxyPasswordInput.value = "";
     activeTabId = null;
     running = false;
     setConfigurationDisabled(false);
@@ -434,17 +513,17 @@ function createTargetPlan(target, startAt, order) {
   return {
     target: { ...target },
     count,
-    runTimes: buildRandomRunTimes(count, target.durationDays, startAt),
+    runTimes: buildRandomRunTimes(count, target.durationWeeks, startAt),
     nextIndex: 0,
     lastRunFinishedAt: 0,
     order,
   };
 }
 
-function buildRandomRunTimes(count, durationDays, startAt) {
+function buildRandomRunTimes(count, durationWeeks, startAt) {
   const runTimes = [startAt];
   if (count <= 1) return runTimes;
-  const durationMs = durationDays * DAY_MS;
+  const durationMs = durationWeeks * WEEK_MS;
   const gapCount = count;
   const extraMs = durationMs - gapCount * MIN_SCHEDULE_INTERVAL_MS;
   if (extraMs < 0) throw new Error("La durée choisie est trop courte pour les intervalles minimaux.");
@@ -469,10 +548,10 @@ function getNextDueAt(plan) {
   return Math.max(plannedTime, plan.lastRunFinishedAt + MIN_SCHEDULE_INTERVAL_MS);
 }
 
-async function executeTargetRun(target, runIndex, runCount, windowId) {
+async function executeTargetRun(target, runIndex, runCount, windowId, rotatingProxyConfig) {
   try {
-    if (target.linkLabel) await ensureOcrWorker(languageInput.value);
-    await processTarget(target, runIndex, runCount, windowId);
+    await ensureOcrWorker(languageInput.value);
+    await processTarget(target, runIndex, runCount, windowId, rotatingProxyConfig);
   } finally {
     if (ocrWorker) {
       try { await ocrWorker.terminate(); } catch { /* worker déjà arrêté */ }
@@ -521,15 +600,15 @@ function setConfigurationDisabled(disabled) {
   }
 }
 
-async function processTarget(target, runIndex, runCount, windowId) {
+async function processTarget(target, runIndex, runCount, windowId, rotatingProxyConfig) {
   const url = target.url;
-  const linkLabel = target.linkLabel;
   setStatus(`${target.pseudo} · exécution ${runIndex}/${runCount} · ouverture…`);
   let tab;
   let attached = false;
   let redirectCount = 0;
   const childTabIds = [];
   const monitoredTabIds = new Set();
+  let proxyRecovery = null;
   const redirectListener = (details) => {
     if (!monitoredTabIds.has(details.tabId) || details.frameId !== 0) return;
     if ((details.transitionQualifiers || []).some((item) => item.includes("redirect"))) redirectCount += 1;
@@ -571,58 +650,85 @@ async function processTarget(target, runIndex, runCount, windowId) {
     const redirectText = redirectCount ? `${redirectCount} redirection(s)` : "aucune redirection détectée";
     addLog(`${target.pseudo} · arrivée sur l’URL`, `${url}\n→ ${finalTab.url || url}\n${redirectText}${finalTab.title ? ` · ${finalTab.title}` : ""}`);
 
-    if (!linkLabel) {
-      showOcrText("OCR non exécuté : aucun libellé de lien configuré.");
-      addLog(`${target.pseudo} · terminé`, "URL stabilisée; aucun libellé fourni, fermeture de l’onglet.");
-      return;
-    }
-
-    const screenshot = await captureScreen(tab.id);
+    const label = target.linkLabel;
+    const activePageTabId = tab.id;
+    setStatus(`${target.pseudo} · vérification du lien exact…`);
+    const screenshot = await captureScreen(activePageTabId);
     renderScreenshot(screenshot);
     const ocrResult = await readScreen(screenshot);
     showOcrText(ocrResult.text);
     addLog(`${target.pseudo} · texte reconnu`, ocrResult.text ? excerpt(ocrResult.text, 700) : "Aucun texte détecté.");
-    const matches = await findExactLinks(tab.id, linkLabel);
+
+    const matches = await findExactLinks(activePageTabId, label);
     if (!matches.length) {
-      addLog(`${target.pseudo} · lien introuvable`, `Aucun lien visible dont le libellé complet correspond à « ${linkLabel} ». Onglet fermé sans clic.`, true);
+      addLog(`${target.pseudo} · lien introuvable`, `Aucun lien visible dont le libellé complet correspond à « ${label} ». Aucun clic effectué.`, true);
       return;
     }
     if (matches.length > 1) {
-      addLog(`${target.pseudo} · liens identiques`, `${matches.length} liens visibles portent le libellé complet « ${linkLabel} ». Aucun clic effectué pour éviter une sélection ambiguë.`, true);
+      addLog(`${target.pseudo} · liens identiques`, `${matches.length} liens visibles portent le libellé complet « ${label} ». Aucun clic effectué pour éviter une sélection ambiguë.`, true);
       return;
     }
     const match = matches[0];
-
-    const description = `Cible : ${target.pseudo}\nCliquer une fois sur le lien complet « ${linkLabel} »${match.href ? ` (${match.href})` : ""}.`;
-    if ((confirmClicksInput.checked || ALWAYS_CONFIRM_RE.test(linkLabel)) && !(await askConfirmation(description))) {
-      addLog(`${target.pseudo} · clic ignoré`, `Lien « ${linkLabel} »`);
+    const description = `Cible : ${target.pseudo}\nCliquer une fois sur le lien complet « ${label} »${match.href ? ` (${match.href})` : ""}.`;
+    if ((confirmClicksInput.checked || ALWAYS_CONFIRM_RE.test(label)) && !(await askConfirmation(description))) {
+      addLog(`${target.pseudo} · clic ignoré`, `Lien « ${label} »`);
       return;
     }
     if (stopRequested) return;
 
-    const redirectsBeforeClick = redirectCount;
-    const openedTabPromise = waitForOpenedTab(tab.id, (childTab) => {
-      childTabIds.push(childTab.id);
-      monitoredTabIds.add(childTab.id);
-    });
-    await clickAt(tab.id, match.x, match.y);
-    const openedTab = await openedTabPromise;
-    addLog(`${target.pseudo} · lien cliqué`, `« ${linkLabel} »${match.href ? ` → ${match.href}` : ""}`);
-    if (openedTab) finalTab = await waitForStableUrl(openedTab.id, false);
-    else {
-      await waitForStableUrl(tab.id);
-      finalTab = await chromeCall(chrome.tabs.get, tab.id);
+    try {
+      if (rotatingProxyConfig) {
+        proxyRecovery = await activateRotatingProxy(rotatingProxyConfig);
+        if (stopRequested) return;
+        addLog(`${target.pseudo} · gateway Webshare actif`, "Le proxy du profil est activé pour ce clic et sa redirection.");
+      }
+      const redirectsBeforeClick = redirectCount;
+      const openedTabPromise = waitForOpenedTab(activePageTabId, (childTab) => {
+        childTabIds.push(childTab.id);
+        monitoredTabIds.add(childTab.id);
+      });
+      await clickAt(activePageTabId, match.x, match.y);
+      const openedTab = await openedTabPromise;
+      addLog(`${target.pseudo} · lien cliqué`, `« ${label} »${match.href ? ` → ${match.href}` : ""}`);
+      if (openedTab) {
+        activeTabId = openedTab.id;
+        finalTab = await waitForStableUrl(openedTab.id, false);
+      } else {
+        await waitForStableUrl(activePageTabId);
+        finalTab = await chromeCall(chrome.tabs.get, activePageTabId);
+      }
+      currentUrlNode.textContent = finalTab.url || "";
+      const redirectsAfterClick = redirectCount - redirectsBeforeClick;
+      addLog(
+        `${target.pseudo} · redirection après clic`,
+        `${redirectsAfterClick ? `${redirectsAfterClick} redirection(s)` : "URL stabilisée sans redirection détectée"}\n→ ${finalTab.url || "URL inconnue"}${openedTab ? " · nouvel onglet temporaire" : ""}`,
+      );
+      if (!openedTab) {
+        try { renderScreenshot(await captureScreen(activePageTabId)); } catch { /* la page peut se fermer pendant la navigation */ }
+      }
+    } finally {
+      if (proxyRecovery) {
+        try {
+          await restoreRotatingProxy(proxyRecovery);
+          proxyRecovery = null;
+          addLog(`${target.pseudo} · proxy restauré`, "Les paramètres proxy précédents de Chrome ont été rétablis.");
+        } catch (error) {
+          addLog("Restauration du proxy Chrome échouée", error.message, true);
+          throw error;
+        }
+      }
     }
-    currentUrlNode.textContent = finalTab.url || "";
-    const redirectsAfterClick = redirectCount - redirectsBeforeClick;
-    addLog(
-      `${target.pseudo} · redirection après clic`,
-      `${redirectsAfterClick ? `${redirectsAfterClick} redirection(s)` : "URL stabilisée sans redirection détectée"}\n→ ${finalTab.url || "URL inconnue"}${openedTab ? " · nouvel onglet temporaire" : ""}`,
-    );
-    if (!openedTab) {
-      try { renderScreenshot(await captureScreen(tab.id)); } catch { /* la page peut se fermer pendant la navigation */ }
-    }
+    if (!stopRequested) addLog(`${target.pseudo} · cycle terminé`, "Lien cliqué et redirection attendue.");
   } finally {
+    if (proxyRecovery || rotatingProxyConfig) {
+      try {
+        const restored = await restoreTemporaryProxyIfNeeded(proxyRecovery);
+        proxyRecovery = null;
+        if (restored) addLog(`${target.pseudo} · proxy restauré`, "Les paramètres proxy précédents de Chrome ont été rétablis.");
+      } catch (error) {
+        addLog("Le proxy Chrome doit être restauré", error.message, true);
+      }
+    }
     chrome.webNavigation.onCommitted.removeListener(redirectListener);
     for (const childTabId of childTabIds) {
       try { await chromeCall(chrome.tabs.remove, childTabId); } catch { /* onglet déjà fermé */ }
@@ -636,6 +742,67 @@ async function processTarget(target, runIndex, runCount, windowId) {
     activeTabId = null;
     currentUrlNode.textContent = "Onglet fermé";
   }
+}
+
+async function activateRotatingProxy(config) {
+  const pending = await chrome.storage.local.get(PROXY_RECOVERY_KEY);
+  if (pending?.[PROXY_RECOVERY_KEY]) await restoreRotatingProxy(pending[PROXY_RECOVERY_KEY]);
+  const previous = await chrome.proxy.settings.get({ incognito: false });
+  if (!["controllable_by_this_extension", "controlled_by_this_extension"].includes(previous.levelOfControl)) {
+    throw new Error("Les paramètres proxy de Chrome sont contrôlés ailleurs ou indisponibles; le gateway Webshare n’a pas été activé.");
+  }
+  const recovery = {
+    restoreWithSet: previous.levelOfControl === "controlled_by_this_extension",
+    previousValue: previous.value,
+  };
+  await chrome.storage.local.set({ [PROXY_RECOVERY_KEY]: recovery });
+  if (stopRequested) {
+    await chrome.storage.local.remove(PROXY_RECOVERY_KEY);
+    throw new Error("Activation du proxy annulée car l’arrêt a été demandé.");
+  }
+  try {
+    await chrome.proxy.settings.set({
+      value: {
+        mode: "fixed_servers",
+        rules: { singleProxy: { scheme: config.scheme, host: config.host, port: config.port } },
+      },
+      scope: "regular",
+    });
+    const applied = await chrome.proxy.settings.get({ incognito: false });
+    const server = applied.value?.rules?.singleProxy;
+    if (applied.levelOfControl !== "controlled_by_this_extension" ||
+        applied.value?.mode !== "fixed_servers" || server?.host !== config.host || server?.port !== config.port ||
+        (server?.scheme ?? "http") !== config.scheme) {
+      throw new Error("Chrome n’a pas confirmé l’application du gateway proxy configuré.");
+    }
+    return recovery;
+  } catch (error) {
+    try { await restoreRotatingProxy(recovery); }
+    catch (restoreError) {
+      throw new Error(`${error.message} La restauration des réglages précédents a aussi échoué : ${restoreError.message}`);
+    }
+    throw error;
+  }
+}
+
+async function restoreRotatingProxy(recovery) {
+  if (recovery.restoreWithSet) {
+    await chrome.proxy.settings.set({ value: recovery.previousValue, scope: "regular" });
+  } else {
+    await chrome.proxy.settings.clear({ scope: "regular" });
+  }
+  await chrome.storage.local.remove(PROXY_RECOVERY_KEY);
+}
+
+async function restoreTemporaryProxyIfNeeded(recovery = null) {
+  let pendingRecovery = recovery;
+  if (!pendingRecovery) {
+    const result = await chrome.storage.local.get(PROXY_RECOVERY_KEY);
+    pendingRecovery = result?.[PROXY_RECOVERY_KEY] || null;
+  }
+  if (!pendingRecovery) return false;
+  await restoreRotatingProxy(pendingRecovery);
+  return true;
 }
 
 function waitForOpenedTab(openerTabId, onOpened, timeoutMs = 900) {

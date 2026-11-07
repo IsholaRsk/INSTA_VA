@@ -1,16 +1,20 @@
 {
   "manifest_version": 3,
   "name": "Agent visuel local — cibles et redirections",
-  "version": "0.4.1",
-  "description": "Gère localement des cibles URL et clique sur les liens visibles dont le libellé complet est fourni.",
+  "version": "0.7.0",
+  "description": "Ouvre des URL, clique les liens indiqués et répète selon le mode intervalle, avec proxy Webshare optionnel.",
   "minimum_chrome_version": "116",
   "permissions": [
     "debugger",
+    "proxy",
     "sidePanel",
     "storage",
     "tabs",
-    "webNavigation"
+    "webNavigation",
+    "webRequest",
+    "webRequestAuthProvider"
   ],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "service_worker.js"
   },
