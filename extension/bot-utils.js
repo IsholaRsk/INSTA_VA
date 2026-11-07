@@ -6,6 +6,10 @@
   "use strict";
 
   var MAX_SAVED_PROXIES = 100;
+  // Le nombre visé n'est plus plafonné : seule une borne de sécurité très haute est gardée
+  // pour éviter les saisies absurdes (Number.MAX_SAFE_INTEGER, « 1e30 »…).
+  var MAX_TARGET_VISITS = 1000000;
+  var TARGET_MODES = ["interval", "goal"];
   var MAX_CONSECUTIVE_FAILURES = 3;
   var OCR_LANGUAGES = ["fra+eng", "fra", "eng"];
   var DEFAULT_OCR_LANGUAGE = "fra+eng";
@@ -213,6 +217,107 @@
     return { proxy: list[index], cursor: (index + 1) % list.length, index: index };
   }
 
+  // ───────────────────────── Cibles : modes et libellé facultatif ─────────────────────────
+
+  function normalizeTargetMode(value) {
+    var mode = String(value == null ? "" : value).trim().toLowerCase();
+    return TARGET_MODES.indexOf(mode) >= 0 ? mode : "interval";
+  }
+
+  /**
+   * Nombre de visites saisi par l'utilisateur. Plus aucune limite métier : 1 à
+   * MAX_TARGET_VISITS (borne technique). Retourne null si la valeur est inutilisable.
+   */
+  function parseTargetVisits(value) {
+    var raw = String(value == null ? "" : value).trim().replace(/[\s\u00a0_]/g, "");
+    if (!raw || !/^\d+$/.test(raw)) return null;
+    var number = Number(raw);
+    if (!Number.isInteger(number) || number < 1 || number > MAX_TARGET_VISITS) return null;
+    return number;
+  }
+
+  /** Durée en semaines d'une cible en mode intervalle. */
+  function parseTargetWeeks(value) {
+    var raw = String(value == null ? "" : value).trim();
+    if (!raw || !/^\d+$/.test(raw)) return null;
+    var number = Number(raw);
+    if (!Number.isInteger(number) || number < 1 || number > 52) return null;
+    return number;
+  }
+
+  /**
+   * Nombre de visites effectivement planifiées pour un mode donné.
+   *  - interval : tirage ±10 autour du nombre visé (comportement historique)
+   *  - goal     : exactement le nombre cible, sans tirage
+   */
+  function executionBounds(mode, targetCount) {
+    var count = Number(targetCount) || 0;
+    if (normalizeTargetMode(mode) === "goal") {
+      return { min: count, max: count, exact: true };
+    }
+    return { min: Math.max(1, count - 10), max: count + 10, exact: false };
+  }
+
+  function planVisits(mode, targetCount, random) {
+    var bounds = executionBounds(mode, targetCount);
+    if (bounds.exact) return Math.max(1, Math.floor(bounds.min));
+    var source = typeof random === "function" ? random : Math.random;
+    var value = Number(source());
+    if (!Number.isFinite(value) || value < 0) value = 0;
+    if (value >= 1) value = 0.9999999999999999;
+    return bounds.min + Math.floor(value * (bounds.max - bounds.min + 1));
+  }
+
+  /** Pause entre deux visites enchaînées dans un même lot (mode objectif). */
+  function nextVisitDelayMs(baseMs, random) {
+    var base = Number(baseMs);
+    if (!Number.isFinite(base) || base < 0) base = 0;
+    var source = typeof random === "function" ? random : Math.random;
+    var value = Number(source());
+    if (!Number.isFinite(value) || value < 0) value = 0;
+    if (value >= 1) value = 0.9999999999999999;
+    // ±40 % de jitter : le rythme reste humain sans allonger inutilement le lot.
+    return Math.round(base * (0.6 + value * 0.8));
+  }
+
+  /** Un libellé vide est autorisé : le bot se contente d'ouvrir la page et de cliquer. */
+  /**
+   * Un libellé peut déclencher une action sensible : toujours confirmer avant le clic.
+   * Sans libellé, le lien choisi automatiquement est aussi soumis à confirmation.
+   */
+  function isSensitiveLabel(value) {
+    var normalized = String(value || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase();
+    var patterns = [
+      /\b(?:login|log in|sign in|connexion|se connecter|connecter|s[’']?identifier)\b/,
+      /\b(?:sign up|register|inscription|creer un compte|ouvrir un compte)\b/,
+      /\b(?:buy|purchase|checkout|payer|paiement|commander|acheter|subscribe|abonnement)\b/,
+      /\b(?:delete|supprimer|desactiver|logout|deconnexion|log out)\b/,
+      /\b(?:confirm|confirmer|valider|submit|envoyer|send|continuer|publish|publier|post|poster|follow|suivre|like|aimer|comment|commenter)\b/,
+      /\b(?:password|mot de passe|otp|code|verification|verify|2fa|authentification)\b/,
+    ];
+    return patterns.some(function (pattern) { return pattern.test(normalized); });
+  }
+
+  function normalizeLinkLabel(value) {
+    var label = String(value == null ? "" : value).trim().replace(/\s+/g, " ");
+    if (label.length > 100) return { ok: false, label: "", message: "Le libellé doit faire 100 caractères maximum." };
+    return { ok: true, label: label };
+  }
+
+  function describeTargetPlan(target) {
+    var mode = normalizeTargetMode(target && target.mode);
+    var visits = Number(target && target.executionTarget) || 0;
+    var label = String((target && target.linkLabel) || "").trim();
+    var click = label ? `cliquer « ${label} »` : "cliquer le lien principal de la page";
+    if (mode === "goal") {
+      return `${visits} visite(s) d’affilée, sans durée : ${click} puis passer à la suivante.`;
+    }
+    return `visée ${visits} (tirage ${Math.max(1, visits - 10)}–${visits + 10}) sur ${Number(target && target.durationWeeks) || 0} semaine(s) : ${click}.`;
+  }
+
   function toCount(value) {
     var number = Number(value);
     return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
@@ -322,6 +427,17 @@
   var api = {
     MAX_SAVED_PROXIES: MAX_SAVED_PROXIES,
     MAX_CONSECUTIVE_FAILURES: MAX_CONSECUTIVE_FAILURES,
+    MAX_TARGET_VISITS: MAX_TARGET_VISITS,
+    TARGET_MODES: TARGET_MODES.slice(),
+    normalizeTargetMode: normalizeTargetMode,
+    parseTargetVisits: parseTargetVisits,
+    parseTargetWeeks: parseTargetWeeks,
+    executionBounds: executionBounds,
+    planVisits: planVisits,
+    nextVisitDelayMs: nextVisitDelayMs,
+    normalizeLinkLabel: normalizeLinkLabel,
+    isSensitiveLabel: isSensitiveLabel,
+    describeTargetPlan: describeTargetPlan,
     OCR_LANGUAGES: OCR_LANGUAGES.slice(),
     DEFAULT_OCR_LANGUAGE: DEFAULT_OCR_LANGUAGE,
     PROXY_SCHEMES: PROXY_SCHEMES.slice(),

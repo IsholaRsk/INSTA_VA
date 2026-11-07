@@ -3,9 +3,9 @@ const PROXY_STORAGE_KEY = "savedProxies";
 const PROXY_SETTINGS_KEY = "proxySettings";
 const PROXY_MIGRATION_FLAG = "proxiesMigrated";
 const MAX_SAVED_TARGETS = 50;
-const MAX_TARGET_EXECUTIONS = 50;
 const MAX_TARGET_DURATION_WEEKS = 52;
-const MAX_SCHEDULED_VISITS = 300;
+const DEFAULT_TARGET_WEEKS = 2;
+const DEFAULT_VISIT_INTERVAL_MS = 2500;
 const PROXY_RECOVERY_KEY = "temporaryProxyRecovery";
 const PROXY_AUTH_SESSION_KEY = "temporaryProxyAuth";
 const MIN_SCHEDULE_INTERVAL_MS = 5 * 60 * 1000;
@@ -15,13 +15,22 @@ const REDIRECT_QUIET_MS = 2500;
 const REDIRECT_MAX_WAIT_MS = 15000;
 const MIN_OCR_CONFIDENCE = 45;
 const OCR_ASSET_BASE = "vendor/";
-const ALWAYS_CONFIRM_RE = /\b(pay|payment|purchase|buy|order|submit|send|delete|remove|post|publish|confirm|payer|paiement|achat|acheter|commander|valider|envoyer|supprimer|effacer|publier|poster|confirmer)\b/i;
 
 const Utils = globalThis.InstaVAUtils;
 if (!Utils) throw new Error("Le module bot-utils.js n’a pas été chargé.");
 const {
   MAX_SAVED_PROXIES,
   MAX_CONSECUTIVE_FAILURES,
+  MAX_TARGET_VISITS,
+  normalizeTargetMode,
+  parseTargetVisits,
+  parseTargetWeeks,
+  executionBounds,
+  planVisits,
+  nextVisitDelayMs,
+  normalizeLinkLabel: normalizeLinkLabelText,
+  isSensitiveLabel,
+  describeTargetPlan,
   validateProxyEntry,
   proxySignature,
   parseProxyLines,
@@ -45,6 +54,11 @@ const targetForm = $("targetForm");
 const targetPseudoInput = $("targetPseudo");
 const targetUrlInput = $("targetUrl");
 const targetLinkLabelInput = $("targetLinkLabel");
+const targetModeIntervalInput = $("targetModeInterval");
+const targetModeGoalInput = $("targetModeGoal");
+const targetExecutionCountLabel = $("targetExecutionCountLabel");
+const targetDurationField = $("targetDurationField");
+const targetModeHint = $("targetModeHint");
 const targetExecutionCountInput = $("targetExecutionCount");
 const targetDurationWeeksInput = $("targetDurationWeeks");
 const commonExecutionCountInput = $("commonExecutionCount");
@@ -93,6 +107,8 @@ const runConfigurationInputs = [
   targetLinkLabelInput,
   targetExecutionCountInput,
   targetDurationWeeksInput,
+  targetModeIntervalInput,
+  targetModeGoalInput,
   commonExecutionCountInput,
   commonDurationWeeksInput,
   useRotatingProxyInput,
@@ -129,6 +145,8 @@ useRotatingProxyInput.addEventListener("change", saveProxySettingsFromForm);
 proxyRotationModeInput.addEventListener("change", saveProxySettingsFromForm);
 autoDisableProxyInput.addEventListener("change", saveProxySettingsFromForm);
 targetForm.addEventListener("submit", saveTargetFromForm);
+targetModeIntervalInput.addEventListener("change", applyTargetModeToForm);
+targetModeGoalInput.addEventListener("change", applyTargetModeToForm);
 cancelEditButton.addEventListener("click", clearTargetForm);
 selectAllTargetsButton.addEventListener("click", selectAllTargets);
 clearSelectionButton.addEventListener("click", clearTargetSelection);
@@ -182,13 +200,24 @@ function sanitizeSavedTarget(raw) {
     const rawLinkLabel = [raw.linkLabel, raw.buttonLabel, legacyClickStep?.label, legacyClickStep?.linkLabel]
       .map((value) => String(value ?? "").trim())
       .find(Boolean) || "";
-    const linkLabel = rawLinkLabel.length <= 100 ? rawLinkLabel : "";
-    const executionTarget = Number(raw.executionTarget);
-    const durationWeeks = Number(raw.durationWeeks ?? (raw.durationDays != null ? Math.ceil(Number(raw.durationDays) / 7) : NaN));
+    const linkLabel = normalizeLinkLabelText(rawLinkLabel);
+    const executionTarget = parseTargetVisits(raw.executionTarget);
+    const mode = normalizeTargetMode(raw.mode);
+    const durationWeeks = parseTargetWeeks(raw.durationWeeks ?? (raw.durationDays != null ? Math.ceil(Number(raw.durationDays) / 7) : NaN));
     if (!pseudo || pseudo.length > 60) return null;
-    if (!Number.isInteger(executionTarget) || executionTarget < 1 || executionTarget > MAX_TARGET_EXECUTIONS) return null;
-    if (!Number.isInteger(durationWeeks) || durationWeeks < 1 || durationWeeks > MAX_TARGET_DURATION_WEEKS) return null;
-    return { id: raw.id, pseudo, url, linkLabel, executionTarget, durationWeeks };
+    if (executionTarget === null) return null;
+    if (!linkLabel.ok) return null;
+    // La durée n'est conservée qu'en mode intervalle; en mode objectif elle est ignorée.
+    if (mode === "interval" && durationWeeks === null) return null;
+    return {
+      id: raw.id,
+      pseudo,
+      url,
+      linkLabel: linkLabel.label,
+      mode,
+      executionTarget,
+      durationWeeks: mode === "interval" ? durationWeeks : DEFAULT_TARGET_WEEKS,
+    };
   } catch {
     return null;
   }
@@ -227,10 +256,15 @@ function renderTargetList() {
     actions.append(editButton, deleteButton);
     topLine.append(pseudo, actions);
 
-    const bounds = getExecutionBounds(target.executionTarget);
+    const bounds = executionBounds(target.mode, target.executionTarget);
     const meta = document.createElement("p");
     meta.className = "target-meta";
-    meta.textContent = `${target.url}\nLien à cliquer : ${target.linkLabel ? `« ${target.linkLabel} »` : "libellé à renseigner"}\nMode intervalle : visée ${target.executionTarget}, tirage ${bounds.min}–${bounds.max} · Durée : ${target.durationWeeks} semaine(s)`;
+    const modeLabel = target.mode === "goal" ? "Objectif" : "Intervalle";
+    const linkText = target.linkLabel ? `« ${target.linkLabel} »` : "lien principal (libellé vide)";
+    const planText = target.mode === "goal"
+      ? `${target.executionTarget} visite(s) d’affilée, sans durée`
+      : `visée ${target.executionTarget}, tirage ${bounds.min}–${bounds.max} · Durée : ${target.durationWeeks} semaine(s)`;
+    meta.textContent = `${target.url}\nLien à cliquer : ${linkText}\nMode ${modeLabel} : ${planText}`;
     content.append(topLine, meta);
     item.append(checkbox, content);
     if (checkbox.checked) item.classList.add("selected");
@@ -308,13 +342,44 @@ function readTargetForm() {
   if (!pseudo) throw new Error("Renseigne un pseudo ou nom de cible.");
   if (pseudo.length > 60) throw new Error("Le pseudo doit faire 60 caractères maximum.");
   const url = normalizeTargetUrl(targetUrlInput.value);
-  const linkLabel = targetLinkLabelInput.value.trim();
-  if (!linkLabel || linkLabel.length > 100) {
-    throw new Error("Renseigne le libellé complet du lien à cliquer (1 à 100 caractères).");
+  // Libellé facultatif : vide = le bot clique le lien principal de la page.
+  const linkLabel = normalizeLinkLabelText(targetLinkLabelInput.value);
+  if (!linkLabel.ok) throw new Error(linkLabel.message);
+  const mode = selectedTargetMode();
+  const executionTarget = parseTargetVisits(targetExecutionCountInput.value);
+  if (executionTarget === null) {
+    throw new Error(`Nombre ${mode === "goal" ? "cible" : "visé"} invalide : saisis un entier positif (maximum ${MAX_TARGET_VISITS.toLocaleString("fr")}).`);
   }
-  const executionTarget = readInteger(targetExecutionCountInput.value, 1, MAX_TARGET_EXECUTIONS, "Nombre visé");
-  const durationWeeks = readInteger(targetDurationWeeksInput.value, 1, MAX_TARGET_DURATION_WEEKS, "Durée en semaines");
-  return { pseudo, url, linkLabel, executionTarget, durationWeeks };
+  const durationWeeks = mode === "goal" ? DEFAULT_TARGET_WEEKS : parseTargetWeeks(targetDurationWeeksInput.value);
+  if (mode === "interval" && durationWeeks === null) {
+    throw new Error(`Durée en semaines invalide : saisis un entier entre 1 et ${MAX_TARGET_DURATION_WEEKS}.`);
+  }
+  return { pseudo, url, linkLabel: linkLabel.label, mode, executionTarget, durationWeeks };
+}
+
+function selectedTargetMode() {
+  return normalizeTargetMode(targetModeGoalInput.checked ? "goal" : "interval");
+}
+
+function setTargetMode(mode) {
+  const normalized = normalizeTargetMode(mode);
+  targetModeGoalInput.checked = normalized === "goal";
+  targetModeIntervalInput.checked = normalized !== "goal";
+  applyTargetModeToForm();
+}
+
+/** Le mode objectif n'a pas de durée : le champ est masqué et non requis. */
+function applyTargetModeToForm() {
+  const mode = selectedTargetMode();
+  const isGoal = mode === "goal";
+  targetDurationField.hidden = isGoal;
+  targetDurationWeeksInput.disabled = isGoal || running;
+  targetDurationWeeksInput.required = !isGoal;
+  targetExecutionCountLabel.textContent = isGoal ? "Nombre cible" : "Nombre visé";
+  targetExecutionCountInput.placeholder = isGoal ? "Ex. 500" : "Ex. 10";
+  targetModeHint.textContent = isGoal
+    ? "Le bot enchaîne exactement ce nombre de visites en une seule fois, sans durée ni étalement. Avec un libellé, il clique ce lien à chaque visite; sans libellé, il clique le lien principal de la page."
+    : "Le total réel est tiré parmi les entiers de max(1, N−10) à N+10. La première visite commence au lancement; les suivantes sont réparties aléatoirement sur la durée propre à cette cible (1 à 52 semaines, 5 minutes minimum entre deux visites).";
 }
 
 function readProxyForm() {
@@ -803,6 +868,7 @@ function editTarget(id) {
   targetLinkLabelInput.value = target.linkLabel;
   targetExecutionCountInput.value = String(target.executionTarget);
   targetDurationWeeksInput.value = String(target.durationWeeks);
+  setTargetMode(target.mode);
   formTitle.textContent = "Modifier une cible";
   saveTargetButton.textContent = "Enregistrer les modifications";
   cancelEditButton.hidden = false;
@@ -830,6 +896,7 @@ async function deleteTarget(id) {
 function clearTargetForm() {
   editingTargetId = null;
   targetForm.reset();
+  setTargetMode("interval");
   formTitle.textContent = "Ajouter une cible";
   saveTargetButton.textContent = "Enregistrer la cible";
   cancelEditButton.hidden = true;
@@ -843,9 +910,14 @@ async function applyCommonValue(field) {
   }
   const isCount = field === "executionTarget";
   try {
-    const value = isCount
-      ? readInteger(commonExecutionCountInput.value, 1, MAX_TARGET_EXECUTIONS, "Nombre cible commun")
-      : readInteger(commonDurationWeeksInput.value, 1, MAX_TARGET_DURATION_WEEKS, "Durée commune en semaines");
+    let value;
+    if (isCount) {
+      value = parseTargetVisits(commonExecutionCountInput.value);
+      if (value === null) throw new Error(`Nombre cible commun invalide : entier positif attendu (maximum ${MAX_TARGET_VISITS.toLocaleString("fr")}).`);
+    } else {
+      value = parseTargetWeeks(commonDurationWeeksInput.value);
+      if (value === null) throw new Error(`Durée commune invalide : entier entre 1 et ${MAX_TARGET_DURATION_WEEKS} attendu.`);
+    }
     const nextTargets = savedTargets.map((target) => ({ ...target, [field]: value }));
     await persistTargets(nextTargets);
     savedTargets = nextTargets;
@@ -876,36 +948,47 @@ async function startRun() {
     return;
   }
 
-  let totalWorstCaseVisits = 0;
+  let expectedVisits = 0;
   let proxyPool = null;
   try {
     for (const target of selectedTargets) {
       normalizeTargetUrl(target.url);
-      if (!String(target.linkLabel || "").trim() || target.linkLabel.length > 100) {
-        throw new Error(`Renseigne le libellé exact du lien à cliquer pour « ${target.pseudo} ».`);
+      const label = normalizeLinkLabelText(target.linkLabel);
+      if (!label.ok) throw new Error(`Libellé du lien de « ${target.pseudo} » : ${label.message}`);
+      if (parseTargetVisits(target.executionTarget) === null) {
+        throw new Error(`Nombre de visites invalide pour « ${target.pseudo} » (entier positif, maximum ${MAX_TARGET_VISITS.toLocaleString("fr")}).`);
       }
-      readInteger(target.executionTarget, 1, MAX_TARGET_EXECUTIONS, `Nombre visé pour ${target.pseudo}`);
-      readInteger(target.durationWeeks, 1, MAX_TARGET_DURATION_WEEKS, `Durée en semaines pour ${target.pseudo}`);
-      totalWorstCaseVisits += target.executionTarget + 10;
+      if (target.mode === "interval" && parseTargetWeeks(target.durationWeeks) === null) {
+        throw new Error(`Durée invalide pour « ${target.pseudo} » (1 à ${MAX_TARGET_DURATION_WEEKS} semaines).`);
+      }
+      expectedVisits += target.executionTarget;
     }
-    if (totalWorstCaseVisits > MAX_SCHEDULED_VISITS) {
-      throw new Error(`La sélection pourrait dépasser ${MAX_SCHEDULED_VISITS} visites de pages au total. Réduis le nombre visé ou la sélection.`);
+    // Aucun plafond de visites : on informe simplement pour les grosses sélections.
+    if (expectedVisits > 500) {
+      addLog("Sélection importante", `${expectedVisits.toLocaleString("fr")} visite(s) au total. Le panneau doit rester ouvert pendant toute la série; tu peux l’arrêter à tout moment.`);
     }
     if (proxySettings.useProxy) {
       const enabledProxies = savedProxies.filter((proxy) => proxy.enabled);
+      // Une liste vide ne doit pas empêcher de travailler : on retombe sur le proxy Chrome.
       if (!enabledProxies.length) {
-        throw new Error("Aucun proxy actif dans la liste. Ajoute ou réactive un proxy Webshare, ou décoche la rotation.");
+        addLog(
+          "Aucun proxy actif",
+          "La rotation est cochée mais la liste ne contient aucun proxy actif : les cycles utilisent le réglage proxy de Chrome.",
+          savedProxies.length > 0,
+        );
       }
       for (const proxy of enabledProxies) {
         const validation = validateProxyEntry(proxy);
         if (!validation.ok) throw new Error(`Proxy invalide (${proxyLabel(proxy)}) : ${validation.message}`);
       }
-      proxyPool = {
-        mode: proxySettings.mode,
-        cursor: proxySettings.cursor,
-        autoDisable: proxySettings.autoDisable,
-        list: enabledProxies.map((proxy) => ({ ...proxy })),
-      };
+      if (enabledProxies.length) {
+        proxyPool = {
+          mode: proxySettings.mode,
+          cursor: proxySettings.cursor,
+          autoDisable: proxySettings.autoDisable,
+          list: enabledProxies.map((proxy) => ({ ...proxy })),
+        };
+      }
     }
   } catch (error) {
     setStatus(error.message);
@@ -943,11 +1026,7 @@ async function startRun() {
     const plans = selectedTargets.map((target, order) => createTargetPlan(target, startAt, order));
     totalRuns = plans.reduce((sum, plan) => sum + plan.count, 0);
     for (const plan of plans) {
-      const bounds = getExecutionBounds(plan.target.executionTarget);
-      addLog(
-        `Planifiée · ${plan.target.pseudo}`,
-        `${plan.count} cycle(s) tiré(s) entre ${bounds.min} et ${bounds.max} (cible ${plan.target.executionTarget} ±10); durée propre : ${plan.target.durationWeeks} semaine(s); cycle fixe : ouvrir → stabiliser → cliquer « ${plan.target.linkLabel} » → attendre la redirection.`,
-      );
+      addLog(`Planifiée · ${plan.target.pseudo}`, `${plan.count.toLocaleString("fr")} cycle(s) — ${describeTargetPlan({ ...plan.target, executionTarget: plan.count })}`);
     }
 
     while (!stopRequested) {
@@ -971,13 +1050,36 @@ async function startRun() {
         }
       }
 
+      // Mode objectif : une seule confirmation pour tout le lot.
+      if (plan.batch && plan.batchApproval === null && planRequiresConfirmation(plan)) {
+        const label = plan.target.linkLabel;
+        const approved = await askConfirmation(
+          `Mode objectif · ${plan.target.pseudo}\n${plan.count.toLocaleString("fr")} visite(s) vont s’enchaîner sur ${plan.target.url}\n` +
+          `Lien : ${label ? `« ${label} »` : "choisi automatiquement (lien principal de la page)"}.\n` +
+          "Une seule validation couvre toute la série.",
+        );
+        plan.batchApproval = approved ? "granted" : "declined";
+        if (!approved) {
+          addLog(`${plan.target.pseudo} · série annulée`, `${plan.count} visite(s) annulée(s) avant le premier clic.`);
+          plan.nextIndex = plan.count;
+          continue;
+        }
+        addLog(`${plan.target.pseudo} · lot validé`, `${plan.count.toLocaleString("fr")} visite(s) confirmée(s) en une fois.`);
+      }
+      if (plan.batch && plan.batchApproval === "declined") {
+        plan.nextIndex = plan.count;
+        continue;
+      }
+
       addLog(
         `${plan.target.pseudo} · exécution ${runNumber}/${plan.count}`,
         `Début : ${new Date().toLocaleString()}${proxy ? `\nProxy : ${proxyLabel(proxy)}` : ""}`,
       );
       let outcome = { status: "skipped" };
       try {
-        outcome = await executeTargetRun(plan.target, runNumber, plan.count, windowId, proxy, proxyPool);
+        outcome = await executeTargetRun(plan.target, runNumber, plan.count, windowId, proxy, proxyPool, {
+          skipConfirm: plan.batch && plan.batchApproval === "granted",
+        });
       } catch (error) {
         if (stopRequested) break;
         totalFailures += 1;
@@ -991,6 +1093,8 @@ async function startRun() {
       if (proxy) await recordProxyOutcome(proxy, outcome, proxyPool);
       if (stopRequested) break;
       plan.lastRunFinishedAt = Date.now();
+      // Mode objectif : les visites s'enchaînent avec une pause courte et variable.
+      if (plan.batch) plan.nextDelayMs = nextVisitDelayMs(DEFAULT_VISIT_INTERVAL_MS, randomUnit);
       plan.nextIndex += 1;
       completedRuns += 1;
     }
@@ -1061,17 +1165,22 @@ async function recordProxyOutcome(proxy, outcome, proxyPool) {
   }
 }
 
-function getExecutionBounds(targetCount) {
-  return { min: Math.max(1, targetCount - 10), max: targetCount + 10 };
-}
-
+/**
+ * Mode intervalle : visites réparties sur la durée (tirage ±10).
+ * Mode objectif : exactement le nombre cible, enchaîné en un seul lot, sans durée.
+ */
 function createTargetPlan(target, startAt, order) {
-  const bounds = getExecutionBounds(target.executionTarget);
-  const count = randomInteger(bounds.min, bounds.max);
+  const mode = normalizeTargetMode(target.mode);
+  const count = planVisits(mode, target.executionTarget, randomUnit);
+  const batch = mode === "goal";
   return {
-    target: { ...target },
+    target: { ...target, mode },
     count,
-    runTimes: buildRandomRunTimes(count, target.durationWeeks, startAt),
+    batch,
+    batchApproval: null,
+    runTimes: batch
+      ? Array.from({ length: count }, () => startAt)
+      : buildRandomRunTimes(count, target.durationWeeks, startAt),
     nextIndex: 0,
     lastRunFinishedAt: 0,
     order,
@@ -1103,10 +1212,19 @@ function buildRandomRunTimes(count, durationWeeks, startAt) {
 function getNextDueAt(plan) {
   const plannedTime = plan.runTimes[plan.nextIndex];
   if (plan.nextIndex === 0) return plannedTime;
+  if (plan.batch) return plan.lastRunFinishedAt + plan.nextDelayMs;
   return Math.max(plannedTime, plan.lastRunFinishedAt + MIN_SCHEDULE_INTERVAL_MS);
 }
 
-async function executeTargetRun(target, runIndex, runCount, windowId, proxy, proxyPool) {
+/**
+ * En mode objectif, un même lot cliquerait le même lien des centaines de fois :
+ * on demande une seule confirmation pour toute la série au lieu d'une par visite.
+ */
+function planRequiresConfirmation(plan) {
+  return confirmClicksInput.checked || isSensitiveLabel(plan.target.linkLabel || "");
+}
+
+async function executeTargetRun(target, runIndex, runCount, windowId, proxy, proxyPool, options = {}) {
   // L'OCR est un contrôle complémentaire : s'il ne démarre pas, le cycle continue
   // avec la seule détection DOM exacte du libellé.
   let ocrReady = true;
@@ -1117,7 +1235,7 @@ async function executeTargetRun(target, runIndex, runCount, windowId, proxy, pro
     addLog("OCR local indisponible", `${error.message} Le cycle continue avec la vérification DOM du libellé.`, true);
     await shutdownOcrWorker("erreur", `OCR en échec : ${error.message}`);
   }
-  return processTarget(target, runIndex, runCount, windowId, proxy, proxyPool, ocrReady);
+  return processTarget(target, runIndex, runCount, windowId, proxy, proxyPool, ocrReady, options);
 }
 
 async function waitUntil(dueAt, pseudo, runNumber, runCount) {
@@ -1134,10 +1252,6 @@ function formatDuration(milliseconds) {
   const hours = Math.floor((totalMinutes % 1440) / 60);
   const minutes = totalMinutes % 60;
   return [days ? `${days} j` : "", hours ? `${hours} h` : "", `${minutes} min`].filter(Boolean).join(" ");
-}
-
-function randomInteger(minimum, maximum) {
-  return minimum + Math.floor(randomUnit() * (maximum - minimum + 1));
 }
 
 function randomUnit() {
@@ -1170,7 +1284,7 @@ function setConfigurationDisabled(disabled) {
  *  - "failed"   : la navigation via ce proxy a échoué
  *  - "skipped"  : pas de clic (lien absent, ambigu ou ignoré) : le proxy n'est pas mis en cause
  */
-async function processTarget(target, runIndex, runCount, windowId, proxy, proxyPool, ocrReady = true) {
+async function processTarget(target, runIndex, runCount, windowId, proxy, proxyPool, ocrReady = true, options = {}) {
   const url = target.url;
   const useProxy = Boolean(proxy);
   setStatus(`${target.pseudo} · exécution ${runIndex}/${runCount} · ouverture${useProxy ? ` via ${proxyLabel(proxy)}` : ""}…`);
@@ -1262,16 +1376,31 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
       }
     }
 
-    const matches = await findExactLinks(activePageTabId, label);
-    if (!matches.length) {
-      addLog(`${target.pseudo} · lien introuvable`, `Aucun lien visible dont le libellé complet correspond à « ${label} ». Aucun clic effectué.`, true);
-      return { status: "skipped", proxyActive };
+    let match;
+    if (label) {
+      const matches = await findExactLinks(activePageTabId, label);
+      if (!matches.length) {
+        addLog(`${target.pseudo} · lien introuvable`, `Aucun lien visible dont le libellé complet correspond à « ${label} ». Aucun clic effectué.`, true);
+        return { status: "skipped", proxyActive };
+      }
+      if (matches.length > 1) {
+        addLog(`${target.pseudo} · liens identiques`, `${matches.length} liens visibles portent le libellé complet « ${label} ». Aucun clic effectué pour éviter une sélection ambiguë.`, true);
+        return { status: "skipped", proxyActive };
+      }
+      match = matches[0];
+    } else {
+      // Aucun libellé : on clique sans critère de texte.
+      const primary = await findPrimaryLink(activePageTabId);
+      if (!primary.picked) {
+        addLog(`${target.pseudo} · aucun lien`, "La page chargée ne contient aucun lien cliquable visible. Aucun clic effectué.", true);
+        return { status: "skipped", proxyActive };
+      }
+      match = primary.picked;
+      addLog(
+        `${target.pseudo} · lien choisi automatiquement`,
+        `${primary.links.length} lien(s) visible(s) → ${primary.picked.reason} : ${primary.picked.text ? `« ${primary.picked.text} »` : "sans texte"}${primary.picked.href ? `\n→ ${primary.picked.href}` : ""}`,
+      );
     }
-    if (matches.length > 1) {
-      addLog(`${target.pseudo} · liens identiques`, `${matches.length} liens visibles portent le libellé complet « ${label} ». Aucun clic effectué pour éviter une sélection ambiguë.`, true);
-      return { status: "skipped", proxyActive };
-    }
-    const match = matches[0];
     const ocrPhrase = findOcrPhrase(ocrResult.words, label);
     if (ocrPhrase) {
       // La capture est prise dans le même viewport émulé : même échelle que les coordonnées DOM.
@@ -1286,8 +1415,12 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
     } else if (ocrResult.words.length) {
       addLog(`${target.pseudo} · OCR sans correspondance`, `Le libellé « ${label} » n’a pas été relu dans la capture; la détection DOM exacte est conservée.`);
     }
-    const description = `Cible : ${target.pseudo}\nCliquer une fois sur le lien complet « ${label} »${match.href ? ` (${match.href})` : ""}.`;
-    if ((confirmClicksInput.checked || ALWAYS_CONFIRM_RE.test(label)) && !(await askConfirmation(description))) {
+    const description = label
+      ? `Cible : ${target.pseudo}\nCliquer une fois sur le lien complet « ${label} »${match.href ? ` (${match.href})` : ""}.`
+      : `Cible : ${target.pseudo}\nCliquer une fois sur le lien choisi automatiquement${match.text ? ` : « ${match.text} »` : ""}${match.href ? ` (${match.href})` : ""}.`;
+    const sensitive = isSensitiveLabel(label);
+    const needsConfirm = (confirmClicksInput.checked || sensitive) && !options.skipConfirm;
+    if (needsConfirm && !(await askConfirmation(description))) {
       addLog(`${target.pseudo} · clic ignoré`, `Lien « ${label} »`);
       return { status: "skipped", proxyActive };
     }
@@ -1446,7 +1579,7 @@ function waitForOpenedTab(openerTabId, onOpened, timeoutMs = 900) {
 }
 
 async function findExactLinks(tabId, label) {
-  const normalizedLabel = normalizeLinkLabel(label);
+  const normalizedLabel = normalizeLinkLabelKey(label);
   const expression = `(() => {
     const target = ${JSON.stringify(normalizedLabel)};
     const normalize = (value) => String(value || "")
@@ -1489,7 +1622,71 @@ async function findExactLinks(tabId, label) {
   return result.result.value;
 }
 
-function normalizeLinkLabel(value) {
+/**
+ * Libellé vide : le bot clique tout seul.
+ *  - un seul lien visible          → ce lien
+ *  - plusieurs liens               → le lien principal : meilleur score surface + texte,
+ *    en ignorant la navigation (header/nav/footer/aside) et les liens purement ancrés.
+ * Le clic vise le centre de la partie visible du lien.
+ */
+async function findPrimaryLink(tabId) {
+  const expression = `(() => {
+    const NAV = 'header, nav, footer, aside, [role="navigation"], [role="banner"], [role="contentinfo"]';
+    const links = Array.from(document.querySelectorAll('a[href], [role="link"]'));
+    const visible = [];
+    for (const [index, element] of links.entries()) {
+      const rect = element.getBoundingClientRect();
+      if (!rect.width || !rect.height || rect.bottom <= 0 || rect.right <= 0 ||
+          rect.top >= window.innerHeight || rect.left >= window.innerWidth) continue;
+      const style = window.getComputedStyle(element);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0 ||
+          style.pointerEvents === 'none' || element.hasAttribute('disabled') ||
+          element.getAttribute('aria-disabled') === 'true') continue;
+      const rawHref = element.href || element.getAttribute('href') || '';
+      if (!rawHref) continue;
+      let href = rawHref;
+      try { href = new URL(rawHref, document.baseURI).href; } catch {}
+      const current = location.href.split('#')[0];
+      if (href.split('#')[0] === current && (href.includes('#') || rawHref === '#')) continue;
+      if (/^(javascript:|mailto:|tel:)/i.test(rawHref)) continue;
+      const text = String(element.innerText || element.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim();
+      const inNavigation = Boolean(element.closest(NAV));
+      const left = Math.max(0, rect.left);
+      const right = Math.min(window.innerWidth, rect.right);
+      const top = Math.max(0, rect.top);
+      const bottom = Math.min(window.innerHeight, rect.bottom);
+      const area = (right - left) * (bottom - top);
+      const score = area + text.length * 60 + (inNavigation ? 0 : 4000) + (/\\b(button|btn)\\b/i.test(element.className) ? 800 : 0);
+      visible.push({
+        x: (left + right) / 2,
+        y: (top + bottom) / 2,
+        href,
+        text: text.slice(0, 120),
+        area,
+        score,
+        inNavigation,
+      });
+    }
+    visible.sort((a, b) => b.score - a.score);
+    return visible;
+  })()`;
+  const result = await sendCDP(tabId, "Runtime.evaluate", {
+    expression,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+  if (result.exceptionDetails) throw new Error("Impossible de repérer les liens cliquables de la page.");
+  const links = Array.isArray(result.result?.value) ? result.result.value : [];
+  if (!links.length) return { links, picked: null };
+  // Un seul lien : aucune ambiguïté, on le clique. Sinon : le lien principal.
+  if (links.length === 1) return { links, picked: { ...links[0], reason: "seul lien visible" } };
+  const main = links.filter((link) => !link.inNavigation);
+  const picked = (main.length ? main : links)[0];
+  return { links, picked: { ...picked, reason: main.length ? "lien principal" : "lien principal (toute la page est en navigation)" } };
+}
+
+/** Clé de comparaison des libellés dans la page (casse, accents, espaces normalisés). */
+function normalizeLinkLabelKey(value) {
   return String(value || "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")

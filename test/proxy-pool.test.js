@@ -197,3 +197,68 @@ test('OCR language falls back to the bundled default', () => {
   assert.equal(utils.normalizeOcrLanguage('deu'), 'fra+eng');
   assert.equal(utils.normalizeOcrLanguage(null), 'fra+eng');
 });
+
+test('target visits are no longer capped by the old 50 limit', () => {
+  for (const value of ['1', '50', '51', '500', '5000', '1000000']) {
+    assert.equal(utils.parseTargetVisits(value), Number(value), `${value} doit être accepté`);
+  }
+  // Espaces de saisie (y compris insécable) tolérés.
+  assert.equal(utils.parseTargetVisits('1 200'), 1200);
+  assert.equal(utils.parseTargetVisits('1\u00a0200'), 1200);
+  for (const value of ['', '0', '-5', '2.5', 'abc', '1000001', '1e6', null, undefined]) {
+    assert.equal(utils.parseTargetVisits(value), null, `${value} doit être refusé`);
+  }
+});
+
+test('duration stays bounded to 1-52 weeks', () => {
+  assert.equal(utils.parseTargetWeeks('1'), 1);
+  assert.equal(utils.parseTargetWeeks('52'), 52);
+  for (const value of ['0', '53', '', '2.5', 'deux']) assert.equal(utils.parseTargetWeeks(value), null);
+});
+
+test('goal mode visits exactly the requested count without any draw', () => {
+  assert.deepEqual(utils.executionBounds('goal', 500), { min: 500, max: 500, exact: true });
+  for (const value of [0, 0.5, 0.999999]) {
+    assert.equal(utils.planVisits('goal', 500, () => value), 500);
+  }
+  assert.equal(utils.executionBounds('interval', 10).exact, false);
+});
+
+test('interval mode keeps the historical ±10 draw and stays in bounds', () => {
+  assert.deepEqual(utils.executionBounds('interval', 10), { min: 1, max: 20, exact: false });
+  assert.deepEqual(utils.executionBounds('interval', 3), { min: 1, max: 13, exact: false });
+  assert.equal(utils.planVisits('interval', 3, () => 0), 1);
+  assert.equal(utils.planVisits('interval', 3, () => 0.999999), 13);
+  for (const target of [1, 10, 100, 5000]) {
+    const bounds = utils.executionBounds('interval', target);
+    for (const value of [0, 0.37, 0.99]) {
+      const planned = utils.planVisits('interval', target, () => value);
+      assert.ok(planned >= bounds.min && planned <= bounds.max, `${planned} hors de ${bounds.min}-${bounds.max}`);
+    }
+  }
+});
+
+test('batched visits keep a jittered delay around the base interval', () => {
+  assert.equal(utils.nextVisitDelayMs(2500, () => 0), 1500);
+  assert.equal(utils.nextVisitDelayMs(2500, () => 0.5), 2500);
+  assert.equal(utils.nextVisitDelayMs(2500, () => 0.999999), 3500);
+  assert.equal(utils.nextVisitDelayMs(0, () => 0.5), 0);
+  assert.equal(utils.nextVisitDelayMs(-10, () => 0.5), 0);
+});
+
+test('the link label is optional and normalised when present', () => {
+  assert.deepEqual(utils.normalizeLinkLabel(''), { ok: true, label: '' });
+  assert.deepEqual(utils.normalizeLinkLabel('   '), { ok: true, label: '' });
+  assert.deepEqual(utils.normalizeLinkLabel(undefined), { ok: true, label: '' });
+  assert.deepEqual(utils.normalizeLinkLabel('  Continuer   vers la boutique '), { ok: true, label: 'Continuer vers la boutique' });
+  const tooLong = utils.normalizeLinkLabel('a'.repeat(101));
+  assert.equal(tooLong.ok, false);
+});
+
+test('target modes describe what the bot will do', () => {
+  assert.equal(utils.normalizeTargetMode('goal'), 'goal');
+  assert.equal(utils.normalizeTargetMode('INTERVAL'), 'interval');
+  assert.equal(utils.normalizeTargetMode('autre'), 'interval');
+  assert.match(utils.describeTargetPlan({ mode: 'goal', executionTarget: 3000, linkLabel: '' }), /3000 visite\(s\) d’affilée/);
+  assert.match(utils.describeTargetPlan({ mode: 'interval', executionTarget: 10, durationWeeks: 2, linkLabel: '' }), /tirage 1–20/);
+});

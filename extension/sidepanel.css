@@ -61,6 +61,12 @@ code { padding: 1px 3px; border-radius: 4px; background: #eef3f6; font: 9px ui-m
 .proxy-field-wide { grid-column: 1 / -1; }
 .proxy-grid label { margin-bottom: 5px; }
 .number-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.mode-fieldset { display: grid; gap: 7px; margin: 0; padding: 10px; border: 1px solid #e2e8ed; border-radius: 9px; background: #fbfcfd; }
+.mode-fieldset legend { padding: 0 4px; color: #4c6270; font-size: 11px; font-weight: 700; }
+.radio-row { display: flex; align-items: flex-start; gap: 8px; margin: 0; cursor: pointer; font-weight: 400; }
+.radio-row input { flex: 0 0 auto; margin: 2px 0 0; accent-color: #176f93; }
+.radio-row span { font-size: 11px; line-height: 1.45; }
+.radio-row strong { color: #22323d; }
 .number-grid label { min-height: 15px; }
 .section-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 h2 { margin: 0; font-size: 13px; }
