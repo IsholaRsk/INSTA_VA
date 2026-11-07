@@ -1,6 +1,8 @@
-# Agent visuel local pour le Chrome déjà ouvert
+# InstaVA — extension Chrome et PWA mobile
 
-Extension Chrome MV3 pour enregistrer et lancer des cibles URL. Chaque cycle suit un enchaînement fixe — ouvrir l’URL, attendre la stabilisation, cliquer sur le lien indiqué, attendre sa redirection — puis se répète selon le mode intervalle. Il n’y a pas de workflow à construire. Les fiches (pseudo, URL, libellé du lien, nombre visé et durée en semaines) restent dans `chrome.storage.local`. Aucun serveur d’automatisation ni API Webshare n’est appelé; si l’option proxy est activée, le clic et sa redirection passent par le gateway Webshare fourni par l’utilisateur.
+L’extension Chrome MV3 de bureau enregistre et lance des cibles URL. Chaque cycle suit un enchaînement fixe — ouvrir l’URL, attendre la stabilisation, cliquer sur le lien indiqué, attendre sa redirection — puis se répète selon le mode intervalle. Il n’y a pas de workflow à construire. Les fiches (pseudo, URL, libellé du lien, nombre visé et durée en semaines) restent dans `chrome.storage.local`. Dans ce mode local, aucun serveur d’automatisation n’est appelé; si l’option proxy est activée, le clic et sa redirection passent par le gateway Webshare fourni par l’utilisateur.
+
+Une PWA distincte est fournie pour l’utilisation depuis l’écran d’accueil d’un iPhone ou d’un téléphone Android. Comme les extensions MV3 ne s’installent pas directement dans Chrome mobile, la PWA délègue les cycles à un navigateur Chromium distant et à un worker planifié. Les URL et libellés y sont donc traités par le serveur configuré.
 
 Le moteur Tesseract.js/WASM et les données française/anglaise sont inclus dans `extension/vendor/`. Les captures et l’OCR restent dans Chrome. L’extension ne lance pas de navigateur séparé et n’exige pas de port de débogage.
 
@@ -33,3 +35,26 @@ Tesseract est un moteur OCR, pas un modèle de raisonnement. La détection du li
 Les fiches persistent localement, mais la planification en cours n’est pas enregistrée comme une alarme d’arrière-plan. Garde Chrome et le panneau latéral ouverts : fermer le panneau ou Chrome arrête la série, sans reprise automatique. Les onglets Chrome préexistants restent ouverts; seuls les onglets temporaires créés par l’extension sont fermés.
 
 Les fichiers OCR tiers et leurs licences sont dans `extension/vendor/`.
+
+## Adaptation mobile (iPhone et Android)
+
+La PWA se trouve dans `public/` (`index.html`, `app.js`, `styles.css`, manifeste, icônes et service worker); Vercel publie ce dossier comme sortie statique. Sur iPhone, ouvre l’URL de l’application dans Safari puis **Partager → Sur l’écran d’accueil**. Sur Android, ouvre-la dans Chrome puis choisis **Installer l’application** ou **Ajouter à l’écran d’accueil**. L’interface reste utilisable dans un navigateur mobile même sans installation.
+
+Le serveur (`api/`) fournit l’authentification Supabase, la gestion des cibles, la planification, les confirmations et l’exécution Playwright/Chromium. Les secrets Webshare ne sont jamais renvoyés au navigateur : l’API les écrit dans Supabase Vault et les déchiffre uniquement au moment d’un cycle. Dans le worker distant, le proxy s’applique à toute la visite du navigateur (ouverture, ressources, clic et redirection); il ne peut pas être basculé uniquement autour du clic comme dans l’extension locale. L’application utilise toujours le cycle fixe : ouvrir l’URL, attendre la stabilisation, rechercher un lien `a[href]` ou `role=link` visible dont le libellé complet correspond (casse, accents et espaces normalisés), ne cliquer que si la correspondance est unique, puis attendre une redirection. Aucun mot de passe de site ni code secret n’est saisi. Les liens sensibles ou l’option de confirmation activée exigent une validation explicite dans l’app.
+
+Les paramètres par cible restent ceux de l’extension : nombre réel tiré entre `max(1, N−10)` et `N+10`, premier cycle dû dès le lancement, durée indépendante de 1 à 52 semaines, délai minimum de cinq minutes entre deux cycles d’une même cible et maximum de 300 visites potentielles par lancement. Une seule session cloud active est autorisée par compte à la fois. Les visites non traitées restent en file côté serveur lorsque l’app est fermée. Une exécution déjà en cours peut terminer après la demande d’arrêt; les visites en attente sont annulées.
+
+### Déploiement requis
+
+Le dépôt contient le frontend et les fonctions, mais **aucun déploiement cloud ni aucune migration n’est exécuté automatiquement**. Pour activer la PWA, un projet Supabase et un projet d’hébergement serverless doivent être explicitement choisis et configurés. Applique `supabase/migrations/202611070001_create_instava_mobile_runner.sql` au projet Supabase choisi, puis définis ces variables côté serveur de l’hébergeur (jamais dans Git ni dans les champs client) :
+
+- `SUPABASE_URL` — URL du projet Supabase.
+- `SUPABASE_ANON_KEY` — clé publique/publishable Supabase; elle est exposée par `/api/config` pour l’authentification du navigateur.
+- `SUPABASE_SERVICE_ROLE_KEY` — clé secrète Supabase réservée au serveur; elle ne doit jamais être exposée au navigateur.
+- `CRON_SECRET` — valeur aléatoire forte; Vercel Cron doit l’envoyer dans `Authorization: Bearer …`.
+
+Les comptes mobiles utilisent Supabase Auth par e-mail et mot de passe; selon la configuration Auth, une confirmation par e-mail peut être nécessaire. Le coffre de secrets utilise l’extension `supabase_vault` et des fonctions SQL limitées au rôle `service_role`. Ne colle jamais les identifiants Webshare dans le dépôt, un ticket ou le chat : saisis-les dans le formulaire Webshare de la PWA.
+
+`vercel.json` demande un passage de worker toutes les cinq minutes. Cette cadence est nécessaire pour garder une capacité suffisante et réduire les retards, mais Vercel Hobby impose une fréquence minimale de 15 minutes et du jitter; il ne satisfait donc pas cette cadence. Le projet candidat et son plan doivent être vérifiés avant le déploiement, et un plan compatible (ou un worker externe équivalent) peut avoir un coût. Le worker ne rend pas les horaires en arrière-plan aussi précis qu’une tâche locale toujours active : les heures dues sont respectées avec retard si l’hébergeur tarde. Le premier cycle de jusqu’à deux cibles sélectionnées est tenté par la requête de lancement; les autres premières visites sont immédiatement mises en file.
+
+Pour les tests syntaxiques du dépôt, exécute `npm run check`. Le lancement local nécessite les variables serveur ci-dessus et un runtime Vercel compatible. Aucun identifiant utilisateur ou compte Webshare n’est fourni avec le dépôt.
