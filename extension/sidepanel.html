@@ -11,7 +11,7 @@
       <header class="header">
         <div class="eyebrow">CHROME · VISION LOCALE</div>
         <h1>Cibles URL enregistrées</h1>
-        <p>Pour chaque cible, le bot suit toujours le même cycle : ouvrir l’URL, cliquer sur le lien indiqué, attendre la redirection puis recommencer selon le mode intervalle. Aucun workflow à construire.</p>
+        <p>Pour chaque cible, le bot suit toujours le même cycle : ouvrir l’URL, cliquer sur le lien indiqué (ou le lien principal si aucun libellé n’est saisi), attendre la redirection, puis recommencer selon le mode choisi — intervalle ou objectif. Aucun workflow à construire.</p>
       </header>
 
       <section class="card target-list-card">
@@ -27,11 +27,11 @@
       </section>
 
       <section class="card bulk-card">
-        <div class="section-title"><h2>Mode intervalle · réglages communs</h2></div>
-        <p class="hint">Ces boutons appliquent la valeur à toutes les fiches enregistrées; les tirages ±10 restent indépendants par cible.</p>
+        <div class="section-title"><h2>Réglages communs</h2></div>
+        <p class="hint">Ces boutons appliquent la valeur à toutes les fiches enregistrées; le tirage ±10 du mode intervalle reste indépendant par cible. Le nombre cible n’a pas de plafond.</p>
         <div class="bulk-row">
           <label for="commonExecutionCount">Nombre cible</label>
-          <input id="commonExecutionCount" type="number" min="1" max="50" step="1" value="10">
+          <input id="commonExecutionCount" type="number" min="1" step="1" value="10" inputmode="numeric">
           <button id="applyCountToAll" class="secondary" type="button">Appliquer à toutes</button>
         </div>
         <div class="bulk-row">
@@ -53,21 +53,33 @@
           <label for="targetUrl" class="space-top">URL cible</label>
           <input id="targetUrl" type="text" maxlength="2048" required spellcheck="false" placeholder="https://exemple.com/page">
 
-          <label for="targetLinkLabel" class="space-top">Libellé exact du lien à cliquer</label>
-          <input id="targetLinkLabel" type="text" maxlength="100" required spellcheck="false" placeholder="Ex. Continuer vers la boutique">
-          <p class="hint">Indique le texte complet du lien visible sur la page. Le cycle est fixe : ouverture et stabilisation de l’URL, un clic sur le lien unique correspondant, puis attente de la redirection. Tu n’as pas à définir d’autres étapes.</p>
+          <label for="targetLinkLabel" class="space-top">Libellé exact du lien à cliquer <span>(facultatif)</span></label>
+          <input id="targetLinkLabel" type="text" maxlength="100" spellcheck="false" placeholder="Laisser vide pour cliquer le lien principal">
+          <p class="hint"><strong>Facultatif.</strong> Renseigné, le bot clique le lien visible dont le libellé correspond exactement. <strong>Vide, il se contente de cliquer</strong> : si la page n’a qu’un seul lien, il clique celui-là; sinon le lien principal (le plus grand, hors navigation) est utilisé. Aucun autre réglage n’est nécessaire.</p>
+
+          <fieldset class="mode-fieldset space-top">
+            <legend>Mode d’exécution</legend>
+            <label class="radio-row">
+              <input id="targetModeInterval" type="radio" name="targetMode" value="interval" checked>
+              <span><strong>Intervalle</strong> — nombre visé réparti sur une durée</span>
+            </label>
+            <label class="radio-row">
+              <input id="targetModeGoal" type="radio" name="targetMode" value="goal">
+              <span><strong>Objectif</strong> — nombre cible atteint d’affilée, sans durée</span>
+            </label>
+          </fieldset>
 
           <div class="number-grid space-top">
             <div>
-              <label for="targetExecutionCount">Nombre visé</label>
-              <input id="targetExecutionCount" type="number" min="1" max="50" step="1" value="10" required>
+              <label for="targetExecutionCount" id="targetExecutionCountLabel">Nombre visé</label>
+              <input id="targetExecutionCount" type="number" min="1" step="1" value="10" inputmode="numeric" required>
             </div>
-            <div>
+            <div id="targetDurationField">
               <label for="targetDurationWeeks">Durée (semaines)</label>
-              <input id="targetDurationWeeks" type="number" min="1" max="52" step="1" value="2" required>
+              <input id="targetDurationWeeks" type="number" min="1" max="52" step="1" value="2" inputmode="numeric">
             </div>
           </div>
-          <p class="hint">Le total réel est tiré parmi les entiers de max(1, N−10) à N+10. La première exécution commence au lancement; les suivantes sont réparties aléatoirement sur la durée propre à cette cible (1 à 52 semaines).</p>
+          <p class="hint" id="targetModeHint"></p>
           <div class="form-actions">
             <button id="saveTarget" class="primary" type="submit">Enregistrer la cible</button>
           </div>
