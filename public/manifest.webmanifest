@@ -1,0 +1,17 @@
+{
+  "id": "/",
+  "name": "InstaVA mobile runner",
+  "short_name": "InstaVA",
+  "description": "Gérez vos cycles URL vers lien depuis votre téléphone.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#07110f",
+  "theme_color": "#07110f",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" },
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

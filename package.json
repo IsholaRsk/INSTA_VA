@@ -1,0 +1,19 @@
+{
+  "name": "insta-va-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "vercel dev",
+    "test": "node --test",
+    "check": "node --check lib/shared.js && node --check lib/runner.js && node --check api/config.js && node --check api/targets.js && node --check api/proxy.js && node --check api/start.js && node --check api/visits.js && node --check api/approve.js && node --check api/stop.js && node --check api/cron.js && node --check public/app.js && node --check public/sw.js"
+  },
+  "dependencies": {
+    "@sparticuz/chromium": "153.0.0",
+    "playwright-core": "1.65.0"
+  },
+  "devDependencies": {
+    "vercel": "65.12.1"
+  }
+}
