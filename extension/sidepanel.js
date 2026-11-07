@@ -1,4 +1,7 @@
 const STORAGE_KEY = "savedTargets";
+const PROXY_STORAGE_KEY = "savedProxies";
+const PROXY_SETTINGS_KEY = "proxySettings";
+const PROXY_MIGRATION_FLAG = "proxiesMigrated";
 const MAX_SAVED_TARGETS = 50;
 const MAX_TARGET_EXECUTIONS = 50;
 const MAX_TARGET_DURATION_WEEKS = 52;
@@ -11,7 +14,28 @@ const VIEWPORT = { width: 1280, height: 800 };
 const REDIRECT_QUIET_MS = 2500;
 const REDIRECT_MAX_WAIT_MS = 15000;
 const MIN_OCR_CONFIDENCE = 45;
+const OCR_ASSET_BASE = "vendor/";
 const ALWAYS_CONFIRM_RE = /\b(pay|payment|purchase|buy|order|submit|send|delete|remove|post|publish|confirm|payer|paiement|achat|acheter|commander|valider|envoyer|supprimer|effacer|publier|poster|confirmer)\b/i;
+
+const Utils = globalThis.InstaVAUtils;
+if (!Utils) throw new Error("Le module bot-utils.js n’a pas été chargé.");
+const {
+  MAX_SAVED_PROXIES,
+  MAX_CONSECUTIVE_FAILURES,
+  validateProxyEntry,
+  proxySignature,
+  parseProxyLines,
+  proxyEndpoint,
+  proxyLabel,
+  proxyCredentialsLine,
+  maskUsername,
+  pickProxy,
+  applyProxyOutcome,
+  sanitizeSavedProxy,
+  sanitizeProxySettings,
+  normalizeOcrLanguage,
+  buildOcrWorkerOptions,
+} = Utils;
 
 const $ = (id) => document.getElementById(id);
 const targetListNode = $("targetList");
@@ -26,11 +50,25 @@ const targetDurationWeeksInput = $("targetDurationWeeks");
 const commonExecutionCountInput = $("commonExecutionCount");
 const commonDurationWeeksInput = $("commonDurationWeeks");
 const useRotatingProxyInput = $("useRotatingProxy");
+const proxyRotationModeInput = $("proxyRotationMode");
+const autoDisableProxyInput = $("autoDisableProxy");
+const proxyListNode = $("proxyList");
+const emptyProxiesNode = $("emptyProxies");
+const proxySummaryNode = $("proxySummary");
+const proxyForm = $("proxyForm");
+const proxyFormTitle = $("proxyFormTitle");
 const proxyHostInput = $("proxyHost");
 const proxyPortInput = $("proxyPort");
 const proxySchemeInput = $("proxyScheme");
 const proxyUsernameInput = $("proxyUsername");
 const proxyPasswordInput = $("proxyPassword");
+const saveProxyButton = $("saveProxy");
+const cancelProxyEditButton = $("cancelProxyEdit");
+const proxyImportForm = $("proxyImportForm");
+const proxyImportLinesInput = $("proxyImportLines");
+const proxyDefaultUsernameInput = $("proxyDefaultUsername");
+const proxyDefaultPasswordInput = $("proxyDefaultPassword");
+const importProxiesButton = $("importProxies");
 const formTitle = $("formTitle");
 const saveTargetButton = $("saveTarget");
 const cancelEditButton = $("cancelEdit");
@@ -39,6 +77,7 @@ const clearSelectionButton = $("clearSelection");
 const applyCountToAllButton = $("applyCountToAll");
 const applyDurationToAllButton = $("applyDurationToAll");
 const languageInput = $("ocrLanguage");
+const ocrWorkerStatusNode = $("ocrWorkerStatus");
 const confirmClicksInput = $("confirmClicks");
 const startButton = $("startButton");
 const stopButton = $("stopButton");
@@ -57,25 +96,38 @@ const runConfigurationInputs = [
   commonExecutionCountInput,
   commonDurationWeeksInput,
   useRotatingProxyInput,
-  proxyHostInput,
-  proxyPortInput,
-  proxySchemeInput,
-  proxyUsernameInput,
-  proxyPasswordInput,
+  proxyRotationModeInput,
+  autoDisableProxyInput,
+  proxyImportLinesInput,
+  proxyDefaultUsernameInput,
+  proxyDefaultPasswordInput,
+  importProxiesButton,
   languageInput,
   confirmClicksInput,
 ];
 
 let savedTargets = [];
+let savedProxies = [];
+let proxySettings = sanitizeProxySettings(null);
 let selectedTargetIds = new Set();
 let editingTargetId = null;
+let editingProxyId = null;
 let running = false;
 let stopRequested = false;
 let activeTabId = null;
 let ocrWorker = null;
+let ocrReadyPromise = null;
+let ocrStartingLanguage = "";
+let ocrWorkerState = "idle";
 let loadedLanguage = "";
 
 $("clearLog").addEventListener("click", () => logNode.replaceChildren());
+proxyForm.addEventListener("submit", saveProxyFromForm);
+proxyImportForm.addEventListener("submit", importProxiesFromText);
+cancelProxyEditButton.addEventListener("click", clearProxyForm);
+useRotatingProxyInput.addEventListener("change", saveProxySettingsFromForm);
+proxyRotationModeInput.addEventListener("change", saveProxySettingsFromForm);
+autoDisableProxyInput.addEventListener("change", saveProxySettingsFromForm);
 targetForm.addEventListener("submit", saveTargetFromForm);
 cancelEditButton.addEventListener("click", clearTargetForm);
 selectAllTargetsButton.addEventListener("click", selectAllTargets);
@@ -96,6 +148,7 @@ window.addEventListener("pagehide", () => {
 });
 
 initializeTargets();
+initializeProxies();
 
 async function initializeTargets() {
   setConfigurationDisabled(true);
@@ -265,18 +318,452 @@ function readTargetForm() {
 }
 
 function readProxyForm() {
-  const host = proxyHostInput.value.trim().replace(/\.$/, "").toLowerCase();
-  if (!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/.test(host)) {
-    throw new Error("Renseigne l’hôte Webshare sans protocole ni port (ex. proxy.exemple.com).");
+  const validation = validateProxyEntry({
+    scheme: proxySchemeInput.value,
+    host: proxyHostInput.value,
+    port: proxyPortInput.value,
+    username: proxyUsernameInput.value,
+    password: proxyPasswordInput.value,
+  });
+  if (!validation.ok) throw new Error(validation.message);
+  return validation.value;
+}
+
+async function persistProxies(proxies = savedProxies) {
+  await chrome.storage.local.set({ [PROXY_STORAGE_KEY]: proxies });
+}
+
+async function persistProxySettings(settings = proxySettings) {
+  proxySettings = sanitizeProxySettings(settings);
+  await chrome.storage.local.set({ [PROXY_SETTINGS_KEY]: proxySettings });
+}
+
+async function initializeProxies() {
+  try {
+    const stored = await chrome.storage.local.get([PROXY_STORAGE_KEY, PROXY_SETTINGS_KEY, PROXY_MIGRATION_FLAG]);
+    savedProxies = Array.isArray(stored?.[PROXY_STORAGE_KEY])
+      ? stored[PROXY_STORAGE_KEY].map(sanitizeSavedProxy).filter(Boolean).slice(0, MAX_SAVED_PROXIES)
+      : [];
+    proxySettings = sanitizeProxySettings(stored?.[PROXY_SETTINGS_KEY]);
+    // Récupère le tout premier proxy saisi dans l'ancien formulaire unique (v0.7.0).
+    if (!stored?.[PROXY_MIGRATION_FLAG]) {
+      const migrated = await migrateLegacyProxyForm();
+      if (migrated) await persistProxies();
+      await chrome.storage.local.set({ [PROXY_MIGRATION_FLAG]: true });
+    }
+    renderProxySettings();
+    renderProxyList();
+  } catch (error) {
+    savedProxies = [];
+    renderProxySettings();
+    renderProxyList();
+    addLog("Chargement des proxys échoué", error.message, true);
   }
-  const port = readInteger(proxyPortInput.value, 1, 65535, "Port du proxy");
-  const scheme = proxySchemeInput.value;
-  if (!["http", "https"].includes(scheme)) throw new Error("Choisis le protocole HTTP ou HTTPS du proxy.");
-  const username = proxyUsernameInput.value;
-  const password = proxyPasswordInput.value;
-  if (!username || !password) throw new Error("Renseigne le nom d’utilisateur et le mot de passe du proxy Webshare.");
-  if (username.length > 512 || password.length > 512) throw new Error("Les identifiants du proxy sont trop longs.");
-  return { host, port, scheme, username, password };
+}
+
+/**
+ * Les versions ≤ 0.7.0 ne conservaient qu'un seul jeu d'identifiants en stockage
+ * de session. On le reprend une fois s'il est encore présent.
+ */
+async function migrateLegacyProxyForm() {
+  try {
+    const session = await chrome.storage.session.get(PROXY_AUTH_SESSION_KEY);
+    const legacy = session?.[PROXY_AUTH_SESSION_KEY];
+    if (!legacy) return false;
+    const validation = validateProxyEntry({ ...legacy, scheme: legacy.scheme || "http" });
+    if (!validation.ok) return false;
+    if (savedProxies.some((proxy) => proxySignature(proxy) === proxySignature(validation.value))) return false;
+    savedProxies.push(createProxyRecord(validation.value));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function createProxyRecord(value) {
+  return {
+    id: crypto.randomUUID(),
+    name: "",
+    scheme: value.scheme,
+    host: value.host,
+    port: value.port,
+    username: value.username,
+    password: value.password,
+    enabled: true,
+    uses: 0,
+    successes: 0,
+    failures: 0,
+    consecutiveFailures: 0,
+    lastUsedAt: "",
+    lastError: "",
+    lastTestAt: "",
+    lastTestIp: "",
+    lastTestError: "",
+    disabledReason: "",
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function renderProxySettings() {
+  useRotatingProxyInput.checked = proxySettings.useProxy;
+  proxyRotationModeInput.value = proxySettings.mode;
+  autoDisableProxyInput.checked = proxySettings.autoDisable;
+}
+
+function renderProxyList() {
+  proxyListNode.replaceChildren();
+  const enabledCount = savedProxies.filter((proxy) => proxy.enabled).length;
+  emptyProxiesNode.hidden = savedProxies.length > 0;
+  proxySummaryNode.textContent = savedProxies.length
+    ? `${enabledCount}/${savedProxies.length} actif(s) · ${proxySettings.mode === "random" ? "au hasard" : "dans l’ordre"}`
+    : "Aucun proxy";
+
+  for (const proxy of savedProxies) {
+    const item = document.createElement("article");
+    item.className = "proxy-item";
+    if (!proxy.enabled) item.classList.add("disabled");
+    if (proxy.enabled && proxySettings.useProxy) item.classList.add("selected");
+    if (proxy.id === editingProxyId) item.classList.add("editing");
+
+    const main = document.createElement("div");
+    main.className = "proxy-main";
+    const enabledToggle = document.createElement("input");
+    enabledToggle.type = "checkbox";
+    enabledToggle.checked = proxy.enabled;
+    enabledToggle.disabled = running;
+    enabledToggle.setAttribute("aria-label", `Activer ${proxyLabel(proxy)}`);
+    enabledToggle.addEventListener("change", () => toggleProxy(proxy.id, enabledToggle.checked));
+
+    const body = document.createElement("div");
+    body.className = "proxy-body";
+    const topLine = document.createElement("div");
+    topLine.className = "proxy-topline";
+    const name = document.createElement("div");
+    name.className = "proxy-name";
+    name.textContent = proxyLabel(proxy);
+    const badge = document.createElement("span");
+    badge.className = "proxy-badge";
+    if (!proxy.enabled) {
+      badge.classList.add("off");
+      badge.textContent = proxy.disabledReason ? "désactivé" : "off";
+    } else if (proxy.lastError) {
+      badge.classList.add("warn");
+      badge.textContent = `${proxy.consecutiveFailures} échec(s)`;
+    } else if (proxy.uses > 0) {
+      badge.classList.add("ok");
+      badge.textContent = "utilisé";
+    } else {
+      badge.textContent = "prêt";
+    }
+    topLine.append(name, badge);
+
+    const meta = document.createElement("p");
+    meta.className = "proxy-meta";
+    const endpoint = proxyEndpoint(proxy);
+    const usage = `${proxy.uses} cycle(s) · ${proxy.successes} OK · ${proxy.failures} échec(s)`;
+    const test = proxy.lastTestIp
+      ? `Dernier test : IP ${proxy.lastTestIp}`
+      : proxy.lastTestError
+        ? `Dernier test échoué : ${proxy.lastTestError}`
+        : "Jamais testé";
+    const identity = proxy.name ? `${endpoint} · ${maskUsername(proxy.username)}` : maskUsername(proxy.username);
+    meta.textContent = [
+      proxy.name ? endpoint : identity,
+      usage,
+      test,
+      proxy.disabledReason || (proxy.lastError ? `Dernière erreur : ${proxy.lastError}` : ""),
+    ].filter(Boolean).join("\n");
+
+    const actions = document.createElement("div");
+    actions.className = "proxy-actions";
+    actions.append(
+      proxyActionButton("Modifier", () => editProxy(proxy.id)),
+      proxyActionButton("Tester", () => testProxy(proxy.id)),
+      proxyActionButton("Copier", () => copyProxy(proxy.id)),
+      proxyActionButton("Supprimer", () => deleteProxy(proxy.id), !running),
+    );
+
+    body.append(topLine, meta, actions);
+    main.append(enabledToggle, body);
+    item.append(main);
+    proxyListNode.append(item);
+  }
+
+  proxySummaryNode.textContent = savedProxies.length
+    ? `${savedProxies.filter((proxy) => proxy.enabled).length}/${savedProxies.length} actif(s) · ${proxySettings.mode === "random" ? "au hasard" : "dans l’ordre"}`
+    : "Aucun proxy";
+}
+
+function proxyActionButton(label, handler, disabled = false) {
+  const button = document.createElement("button");
+  button.className = "text-button";
+  button.type = "button";
+  button.textContent = label;
+  button.disabled = disabled || running;
+  button.addEventListener("click", handler);
+  return button;
+}
+
+function clearProxyForm() {
+  editingProxyId = null;
+  proxyForm.reset();
+  proxySchemeInput.value = "http";
+  proxyHostInput.value = "";
+  proxyPortInput.value = "";
+  proxyUsernameInput.value = "";
+  proxyPasswordInput.value = "";
+  proxyFormTitle.textContent = "Ajouter un proxy";
+  saveProxyButton.textContent = "Ajouter à la liste";
+  cancelProxyEditButton.hidden = true;
+  renderProxyList();
+}
+
+async function saveProxyFromForm(event) {
+  event.preventDefault();
+  if (running) return;
+  let value;
+  try {
+    value = readProxyForm();
+  } catch (error) {
+    setStatus(error.message);
+    return;
+  }
+
+  const signature = proxySignature(value);
+  const duplicate = savedProxies.find((proxy) => proxySignature(proxy) === signature && proxy.id !== editingProxyId);
+  if (duplicate) {
+    setStatus(`Ce proxy existe déjà dans la liste (${proxyLabel(duplicate)}).`);
+    return;
+  }
+
+  const isEditing = Boolean(editingProxyId);
+  if (!isEditing && savedProxies.length >= MAX_SAVED_PROXIES) {
+    setStatus(`Maximum ${MAX_SAVED_PROXIES} proxys enregistrés.`);
+    return;
+  }
+
+  const nextProxies = isEditing
+    ? savedProxies.map((proxy) => proxy.id === editingProxyId
+      ? { ...proxy, ...value, enabled: true, disabledReason: "", consecutiveFailures: 0, lastError: "" }
+      : proxy)
+    : [...savedProxies, createProxyRecord(value)];
+
+  try {
+    await persistProxies(nextProxies);
+  } catch (error) {
+    addLog("Enregistrement du proxy échoué", error.message, true);
+    return;
+  }
+  savedProxies = nextProxies;
+  clearProxyForm();
+  renderProxyList();
+  setStatus(isEditing ? "Proxy mis à jour." : "Proxy ajouté à la liste.");
+}
+
+async function importProxiesFromText(event) {
+  event.preventDefault();
+  if (running) return;
+  const defaultUsername = proxyDefaultUsernameInput.value;
+  const defaultPassword = proxyDefaultPasswordInput.value;
+  const { entries, errors } = parseProxyLines(proxyImportLinesInput.value, {
+    defaultScheme: proxySchemeInput.value || "http",
+    defaultUsername,
+    defaultPassword,
+  });
+
+  if (!entries.length) {
+    setStatus(errors.length
+      ? `Aucun proxy importé. ${errors.length} ligne(s) refusée(s) — ${errors[0].message}`
+      : "Colle au moins une ligne de proxy avant d’importer.");
+    return;
+  }
+
+  const known = new Set(savedProxies.map(proxySignature));
+  const additions = [];
+  let duplicates = 0;
+  for (const entry of entries) {
+    const signature = proxySignature(entry);
+    if (known.has(signature)) {
+      duplicates += 1;
+      continue;
+    }
+    if (savedProxies.length + additions.length >= MAX_SAVED_PROXIES) break;
+    known.add(signature);
+    additions.push(createProxyRecord(entry));
+  }
+
+  if (additions.length) {
+    const nextProxies = [...savedProxies, ...additions];
+    try {
+      await persistProxies(nextProxies);
+      savedProxies = nextProxies;
+    } catch (error) {
+      addLog("Import des proxys échoué", error.message, true);
+      return;
+    }
+  }
+
+  proxyImportLinesInput.value = "";
+  renderProxyList();
+  const parts = [`${additions.length} proxy(s) importé(s)`];
+  if (duplicates) parts.push(`${duplicates} doublon(s) ignoré(s)`);
+  if (errors.length) parts.push(`${errors.length} ligne(s) invalide(s)`);
+  if (savedProxies.length >= MAX_SAVED_PROXIES) parts.push(`limite de ${MAX_SAVED_PROXIES} atteinte`);
+  setStatus(`${parts.join(" · ")}.`);
+  if (errors.length) addLog("Lignes ignorées", errors.map((error) => `Ligne ${error.line} : ${error.message}`).join("\n"), true);
+  proxyDefaultPasswordInput.value = "";
+}
+
+async function toggleProxy(id, enabled) {
+  if (running) return;
+  const nextProxies = savedProxies.map((proxy) => proxy.id === id
+    ? { ...proxy, enabled, disabledReason: "", consecutiveFailures: enabled ? 0 : proxy.consecutiveFailures }
+    : proxy);
+  try {
+    await persistProxies(nextProxies);
+  } catch (error) {
+    addLog("Mise à jour du proxy échouée", error.message, true);
+    return;
+  }
+  savedProxies = nextProxies;
+  renderProxyList();
+  setStatus(enabled ? "Proxy réactivé." : "Proxy désactivé; il sera ignoré par la rotation.");
+}
+
+function editProxy(id) {
+  if (running) return;
+  const proxy = savedProxies.find((item) => item.id === id);
+  if (!proxy) return;
+  editingProxyId = proxy.id;
+  proxyHostInput.value = proxy.host;
+  proxyPortInput.value = String(proxy.port);
+  proxySchemeInput.value = proxy.scheme;
+  proxyUsernameInput.value = proxy.username;
+  proxyPasswordInput.value = proxy.password;
+  proxyFormTitle.textContent = "Modifier le proxy";
+  saveProxyButton.textContent = "Enregistrer les modifications";
+  cancelProxyEditButton.hidden = false;
+  proxyForm.scrollIntoView({ behavior: "smooth", block: "start" });
+  proxyHostInput.focus();
+  renderProxyList();
+}
+
+async function deleteProxy(id) {
+  if (running) return;
+  const proxy = savedProxies.find((item) => item.id === id);
+  if (!proxy || !window.confirm(`Supprimer le proxy « ${proxyLabel(proxy)} » ?`)) return;
+  const nextProxies = savedProxies.filter((item) => item.id !== id);
+  try {
+    await persistProxies(nextProxies);
+    savedProxies = nextProxies;
+    if (editingProxyId === id) clearProxyForm();
+    renderProxyList();
+    setStatus("Proxy supprimé.");
+  } catch (error) {
+    addLog("Suppression du proxy échouée", error.message, true);
+  }
+}
+
+async function copyProxy(id) {
+  const proxy = savedProxies.find((item) => item.id === id);
+  if (!proxy) return;
+  const line = proxyCredentialsLine(proxy);
+  try {
+    await navigator.clipboard.writeText(line);
+    setStatus("Ligne host:port:user:pass copiée dans le presse-papiers.");
+  } catch {
+    setStatus(`Copie impossible; ligne du proxy : ${line}`);
+  }
+}
+
+async function saveProxySettingsFromForm() {
+  if (running) {
+    renderProxySettings();
+    return;
+  }
+  try {
+    await persistProxySettings({
+      ...proxySettings,
+      useProxy: useRotatingProxyInput.checked,
+      mode: proxyRotationModeInput.value,
+      autoDisable: autoDisableProxyInput.checked,
+    });
+    renderProxyList();
+    setStatus(proxySettings.useProxy
+      ? "Rotation des proxys activée pour les prochains cycles."
+      : "Rotation désactivée : le proxy Chrome existant sera utilisé.");
+  } catch (error) {
+    addLog("Réglages proxy non enregistrés", error.message, true);
+  }
+}
+
+async function testProxy(id) {
+  if (running) return;
+  const proxy = savedProxies.find((item) => item.id === id);
+  if (!proxy) return;
+  setStatus(`Test du proxy ${proxyLabel(proxy)}…`);
+  let recovery = null;
+  const result = { ip: "", error: "" };
+  try {
+    const control = await chrome.proxy.settings.get({ incognito: false });
+    if (!["controllable_by_this_extension", "controlled_by_this_extension"].includes(control.levelOfControl)) {
+      throw new Error("Les paramètres proxy de Chrome sont contrôlés ailleurs.");
+    }
+    await chrome.storage.session.set({
+      [PROXY_AUTH_SESSION_KEY]: {
+        host: proxy.host,
+        port: proxy.port,
+        username: proxy.username,
+        password: proxy.password,
+      },
+    });
+    recovery = await activateRotatingProxy(proxy);
+    const endpoint = `https://api.ipify.org?format=json&ts=${Date.now()}`;
+    const response = await fetch(endpoint, { cache: "no-store" });
+    if (!response.ok) throw new Error(`Le service de test a répondu ${response.status}.`);
+    const text = (await response.text()).trim();
+    let address = text;
+    try {
+      const parsed = JSON.parse(text);
+      address = String(parsed?.ip || text);
+    } catch { /* réponse texte simple */ }
+    if (!address) throw new Error("Aucune adresse IP renvoyée.");
+    result.ip = address.slice(0, 80);
+  } catch (error) {
+    result.error = String(error.message || "Test impossible.").slice(0, 200);
+  } finally {
+    if (recovery) {
+      try { await restoreRotatingProxy(recovery); } catch (error) { addLog("Restauration du proxy après test échouée", error.message, true); }
+    }
+    try { await chrome.storage.session.remove(PROXY_AUTH_SESSION_KEY); } catch { /* session déjà fermée */ }
+    if (recovery) {
+      const control = await chromeCall(chrome.proxy.settings.get, { incognito: false }).catch(() => null);
+      if (control && !["controllable_by_this_extension", "controlled_by_this_extension"].includes(control.levelOfControl)) {
+        result.error = "Proxy de test restauré, mais Chrome ne rend pas le contrôle à l’extension.";
+      }
+    }
+  }
+
+  const nextProxies = savedProxies.map((item) => item.id === id
+    ? {
+      ...item,
+      lastTestAt: new Date().toISOString(),
+      lastTestIp: result.ip,
+      lastTestError: result.error,
+      enabled: result.ip ? true : item.enabled,
+      disabledReason: result.ip ? "" : item.disabledReason,
+    }
+    : item);
+  try { await persistProxies(nextProxies); } catch { /* statistique non bloquante */ }
+  savedProxies = nextProxies;
+  renderProxyList();
+  if (result.ip) {
+    setStatus(`Proxy ${proxyLabel(proxy)} fonctionnel · IP de sortie ${result.ip}.`);
+    addLog(`${proxyLabel(proxy)} · test réussi`, `IP de sortie observée : ${result.ip}`);
+  } else {
+    setStatus(`Proxy ${proxyLabel(proxy)} en échec : ${result.error}`);
+    addLog(`${proxyLabel(proxy)} · test échoué`, result.error, true);
+  }
 }
 
 function readInteger(raw, minimum, maximum, label) {
@@ -390,7 +877,7 @@ async function startRun() {
   }
 
   let totalWorstCaseVisits = 0;
-  let rotatingProxyConfig = null;
+  let proxyPool = null;
   try {
     for (const target of selectedTargets) {
       normalizeTargetUrl(target.url);
@@ -404,7 +891,22 @@ async function startRun() {
     if (totalWorstCaseVisits > MAX_SCHEDULED_VISITS) {
       throw new Error(`La sélection pourrait dépasser ${MAX_SCHEDULED_VISITS} visites de pages au total. Réduis le nombre visé ou la sélection.`);
     }
-    if (useRotatingProxyInput.checked) rotatingProxyConfig = readProxyForm();
+    if (proxySettings.useProxy) {
+      const enabledProxies = savedProxies.filter((proxy) => proxy.enabled);
+      if (!enabledProxies.length) {
+        throw new Error("Aucun proxy actif dans la liste. Ajoute ou réactive un proxy Webshare, ou décoche la rotation.");
+      }
+      for (const proxy of enabledProxies) {
+        const validation = validateProxyEntry(proxy);
+        if (!validation.ok) throw new Error(`Proxy invalide (${proxyLabel(proxy)}) : ${validation.message}`);
+      }
+      proxyPool = {
+        mode: proxySettings.mode,
+        cursor: proxySettings.cursor,
+        autoDisable: proxySettings.autoDisable,
+        list: enabledProxies.map((proxy) => ({ ...proxy })),
+      };
+    }
   } catch (error) {
     setStatus(error.message);
     return;
@@ -422,14 +924,15 @@ async function startRun() {
   let completedRuns = 0;
   let totalRuns = 0;
   try {
-    if (rotatingProxyConfig) {
-      const { host, port, username, password } = rotatingProxyConfig;
+    if (proxyPool) {
       const proxyControl = await chrome.proxy.settings.get({ incognito: false });
       if (!["controllable_by_this_extension", "controlled_by_this_extension"].includes(proxyControl.levelOfControl)) {
         throw new Error("Les paramètres proxy de Chrome sont contrôlés ailleurs ou indisponibles; aucun onglet ne sera ouvert.");
       }
-      await chrome.storage.session.set({ [PROXY_AUTH_SESSION_KEY]: { host, port, username, password } });
-      addLog("Proxy Webshare prêt", `Le gateway sera activé uniquement autour des clics de lien et de leur redirection (${host}:${port}).`);
+      addLog(
+        "Proxys Webshare prêts",
+        `${proxyPool.list.length} proxy(s) actif(s), rotation ${proxyPool.mode === "random" ? "au hasard" : "dans l’ordre"}. Un proxy différent est appliqué à chaque cycle; ${proxyPool.autoDisable ? `il est désactivé après ${MAX_CONSECUTIVE_FAILURES} échecs consécutifs` : "les échecs ne désactivent rien"}.`,
+      );
     } else {
       await chrome.storage.session.remove(PROXY_AUTH_SESSION_KEY);
       addLog("Proxy Webshare désactivé", "Les cycles utiliseront le réglage proxy actuellement configuré dans Chrome.");
@@ -458,14 +961,34 @@ async function startRun() {
       if (dueAt > Date.now()) await waitUntil(dueAt, plan.target.pseudo, runNumber, plan.count);
       if (stopRequested) break;
 
-      addLog(`${plan.target.pseudo} · exécution ${runNumber}/${plan.count}`, `Début : ${new Date().toLocaleString()}`);
+      let proxy = null;
+      if (proxyPool) {
+        const picked = pickProxy(proxyPool.list, { mode: proxyPool.mode, cursor: proxyPool.cursor });
+        proxyPool.cursor = picked.cursor;
+        proxy = picked.proxy;
+        if (!proxy) {
+          addLog("Aucun proxy disponible", "Tous les proxys de la liste sont désactivés; le cycle utilise le réglage proxy de Chrome.", true);
+        }
+      }
+
+      addLog(
+        `${plan.target.pseudo} · exécution ${runNumber}/${plan.count}`,
+        `Début : ${new Date().toLocaleString()}${proxy ? `\nProxy : ${proxyLabel(proxy)}` : ""}`,
+      );
+      let outcome = { status: "skipped" };
       try {
-        await executeTargetRun(plan.target, runNumber, plan.count, windowId, rotatingProxyConfig);
+        outcome = await executeTargetRun(plan.target, runNumber, plan.count, windowId, proxy, proxyPool);
       } catch (error) {
         if (stopRequested) break;
         totalFailures += 1;
+        outcome = {
+          status: "failed",
+          error: error.proxyError || error.message,
+          active: Boolean(error.proxyActive),
+        };
         addLog(`${plan.target.pseudo} · exécution en erreur`, error.message, true);
       }
+      if (proxy) await recordProxyOutcome(proxy, outcome, proxyPool);
       if (stopRequested) break;
       plan.lastRunFinishedAt = Date.now();
       plan.nextIndex += 1;
@@ -482,16 +1005,19 @@ async function startRun() {
       addLog("Erreur", error.message, true);
     }
   } finally {
-    if (ocrWorker) {
-      try { await ocrWorker.terminate(); } catch { /* worker déjà arrêté */ }
-    }
-    ocrWorker = null;
-    loadedLanguage = "";
+    await shutdownOcrWorker("fin de série");
     try { await chrome.storage.session.remove(PROXY_AUTH_SESSION_KEY); }
     catch (error) { addLog("Nettoyage des identifiants proxy échoué", error.message, true); }
-    if (rotatingProxyConfig) {
-      rotatingProxyConfig.username = "";
-      rotatingProxyConfig.password = "";
+    if (proxyPool) {
+      proxyPool.list.forEach((proxy) => {
+        proxy.username = "";
+        proxy.password = "";
+      });
+      try {
+        await persistProxySettings({ ...proxySettings, cursor: proxyPool.cursor });
+      } catch (error) {
+        addLog("Curseur de rotation non enregistré", error.message, true);
+      }
     }
     proxyUsernameInput.value = "";
     proxyPasswordInput.value = "";
@@ -499,7 +1025,39 @@ async function startRun() {
     running = false;
     setConfigurationDisabled(false);
     stopButton.disabled = true;
+    renderProxyList();
     updateSelectionSummary();
+  }
+}
+
+/**
+ * Enregistre l'issue du cycle sur le proxy concerné (compteurs, échecs consécutifs,
+ * désactivation automatique) et rafraîchit la liste affichée.
+ */
+async function recordProxyOutcome(proxy, outcome, proxyPool) {
+  const entry = proxyPool.list.find((item) => item.id === proxy.id);
+  if (!entry) return;
+  // Cycle échoué avant toute application du proxy (OCR, onglet, arrêt) :
+  // rien à imputer au proxy.
+  if (outcome.active === false) return;
+  const updated = applyProxyOutcome(entry, outcome, {
+    autoDisable: proxyPool.autoDisable,
+    maxConsecutiveFailures: MAX_CONSECUTIVE_FAILURES,
+  });
+  Object.assign(entry, updated);
+  savedProxies = savedProxies.map((item) => item.id === entry.id ? { ...entry } : item);
+  renderProxyList();
+  if (outcome.status === "success") {
+    addLog(`Proxy ${proxyLabel(proxy)} · cycle réussi`, `${entry.successes} succès · ${entry.failures} échec(s) pour ${entry.uses} cycle(s).`);
+  } else if (outcome.status === "failed" && entry.enabled === false) {
+    addLog(`Proxy ${proxyLabel(proxy)} désactivé`, `${entry.disabledReason} Il reste ${savedProxies.filter((item) => item.enabled).length} proxy(s) actif(s).`, true);
+  } else if (outcome.status === "failed") {
+    addLog(`Proxy ${proxyLabel(proxy)} · échec ${entry.consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}`, String(outcome.error || "Échec du cycle."));
+  }
+  try {
+    await persistProxies();
+  } catch (error) {
+    addLog("Statistiques proxy non enregistrées", error.message, true);
   }
 }
 
@@ -548,17 +1106,18 @@ function getNextDueAt(plan) {
   return Math.max(plannedTime, plan.lastRunFinishedAt + MIN_SCHEDULE_INTERVAL_MS);
 }
 
-async function executeTargetRun(target, runIndex, runCount, windowId, rotatingProxyConfig) {
+async function executeTargetRun(target, runIndex, runCount, windowId, proxy, proxyPool) {
+  // L'OCR est un contrôle complémentaire : s'il ne démarre pas, le cycle continue
+  // avec la seule détection DOM exacte du libellé.
+  let ocrReady = true;
   try {
     await ensureOcrWorker(languageInput.value);
-    await processTarget(target, runIndex, runCount, windowId, rotatingProxyConfig);
-  } finally {
-    if (ocrWorker) {
-      try { await ocrWorker.terminate(); } catch { /* worker déjà arrêté */ }
-    }
-    ocrWorker = null;
-    loadedLanguage = "";
+  } catch (error) {
+    ocrReady = false;
+    addLog("OCR local indisponible", `${error.message} Le cycle continue avec la vérification DOM du libellé.`, true);
+    await shutdownOcrWorker("erreur", `OCR en échec : ${error.message}`);
   }
+  return processTarget(target, runIndex, runCount, windowId, proxy, proxyPool, ocrReady);
 }
 
 async function waitUntil(dueAt, pseudo, runNumber, runCount) {
@@ -589,6 +1148,9 @@ function randomUnit() {
 
 function setConfigurationDisabled(disabled) {
   runConfigurationInputs.forEach((input) => { input.disabled = disabled; });
+  proxyImportForm.querySelectorAll("textarea").forEach((element) => { element.disabled = disabled; });
+  for (const button of [saveProxyButton, cancelProxyEditButton]) button.disabled = disabled;
+  proxyListNode.querySelectorAll("input, button").forEach((element) => { element.disabled = disabled; });
   for (const button of [cancelEditButton, selectAllTargetsButton, clearSelectionButton, applyCountToAllButton, applyDurationToAllButton, saveTargetButton]) {
     button.disabled = disabled;
   }
@@ -597,18 +1159,32 @@ function setConfigurationDisabled(disabled) {
     selectAllTargetsButton.disabled = savedTargets.length === 0;
     applyCountToAllButton.disabled = savedTargets.length === 0;
     applyDurationToAllButton.disabled = savedTargets.length === 0;
+    renderProxyList();
   }
 }
 
-async function processTarget(target, runIndex, runCount, windowId, rotatingProxyConfig) {
+/**
+ * Un cycle complet. `proxy` est le proxy Webshare tiré pour ce cycle (ou null).
+ * Le retour `{ status }` alimente les statistiques du proxy :
+ *  - "success"  : le clic et la redirection ont abouti via ce proxy
+ *  - "failed"   : la navigation via ce proxy a échoué
+ *  - "skipped"  : pas de clic (lien absent, ambigu ou ignoré) : le proxy n'est pas mis en cause
+ */
+async function processTarget(target, runIndex, runCount, windowId, proxy, proxyPool, ocrReady = true) {
   const url = target.url;
-  setStatus(`${target.pseudo} · exécution ${runIndex}/${runCount} · ouverture…`);
+  const useProxy = Boolean(proxy);
+  setStatus(`${target.pseudo} · exécution ${runIndex}/${runCount} · ouverture${useProxy ? ` via ${proxyLabel(proxy)}` : ""}…`);
   let tab;
   let attached = false;
   let redirectCount = 0;
   const childTabIds = [];
   const monitoredTabIds = new Set();
+  let proxyActive = false;
   let proxyRecovery = null;
+  let clicked = false;
+  let failure = null;
+  let proxyApplied = false;
+  let proxyActivationAttempted = false;
   const redirectListener = (details) => {
     if (!monitoredTabIds.has(details.tabId) || details.frameId !== 0) return;
     if ((details.transitionQualifiers || []).some((item) => item.includes("redirect"))) redirectCount += 1;
@@ -634,6 +1210,24 @@ async function processTarget(target, runIndex, runCount, windowId, rotatingProxy
       screenHeight: VIEWPORT.height,
     });
 
+    // Le proxy reste actif pendant toute la navigation, le clic et la redirection.
+    if (useProxy) {
+      proxyActivationAttempted = true;
+      await chrome.storage.session.set({
+        [PROXY_AUTH_SESSION_KEY]: {
+          host: proxy.host,
+          port: proxy.port,
+          username: proxy.username,
+          password: proxy.password,
+        },
+      });
+      proxyRecovery = await activateRotatingProxy(proxy);
+      proxyActive = true;
+      proxyApplied = true;
+      if (stopRequested) return { status: "skipped", proxyActive: false };
+      addLog(`${target.pseudo} · proxy actif`, `Le proxy ${proxyLabel(proxy)} route l’ouverture, le clic et la redirection.`);
+    }
+
     let navigationFinished = false;
     const observer = observeDuringLoad(tab.id, () => navigationFinished);
     const completed = waitForComplete(tab.id, 35000);
@@ -655,72 +1249,82 @@ async function processTarget(target, runIndex, runCount, windowId, rotatingProxy
     setStatus(`${target.pseudo} · vérification du lien exact…`);
     const screenshot = await captureScreen(activePageTabId);
     renderScreenshot(screenshot);
-    const ocrResult = await readScreen(screenshot);
-    showOcrText(ocrResult.text);
-    addLog(`${target.pseudo} · texte reconnu`, ocrResult.text ? excerpt(ocrResult.text, 700) : "Aucun texte détecté.");
+    let ocrResult = { text: "", words: [], width: 0, height: 0 };
+    if (ocrReady) {
+      try {
+        ocrResult = await readScreen(screenshot);
+        showOcrText(ocrResult.text);
+        addLog(`${target.pseudo} · texte reconnu`, ocrResult.text ? excerpt(ocrResult.text, 700) : "Aucun texte détecté.");
+      } catch (error) {
+        // L'OCR ne bloque pas le cycle : la détection DOM exacte reste la référence.
+        addLog(`${target.pseudo} · OCR indisponible`, error.message, true);
+        await shutdownOcrWorker("erreur", `OCR en échec : ${error.message}`);
+      }
+    }
 
     const matches = await findExactLinks(activePageTabId, label);
     if (!matches.length) {
       addLog(`${target.pseudo} · lien introuvable`, `Aucun lien visible dont le libellé complet correspond à « ${label} ». Aucun clic effectué.`, true);
-      return;
+      return { status: "skipped", proxyActive };
     }
     if (matches.length > 1) {
       addLog(`${target.pseudo} · liens identiques`, `${matches.length} liens visibles portent le libellé complet « ${label} ». Aucun clic effectué pour éviter une sélection ambiguë.`, true);
-      return;
+      return { status: "skipped", proxyActive };
     }
     const match = matches[0];
+    const ocrPhrase = findOcrPhrase(ocrResult.words, label);
+    if (ocrPhrase) {
+      // La capture est prise dans le même viewport émulé : même échelle que les coordonnées DOM.
+      const scaleX = ocrResult.width ? ocrResult.width / VIEWPORT.width : 1;
+      const scaleY = ocrResult.height ? ocrResult.height / VIEWPORT.height : 1;
+      const distance = Math.hypot(ocrPhrase.x / scaleX - match.x, ocrPhrase.y / scaleY - match.y);
+      addLog(
+        `${target.pseudo} · OCR concordant`,
+        `« ${label} » retrouvé dans la capture (confiance ${Math.round(ocrPhrase.confidence)} %), à ${Math.round(distance)} px du lien DOM.`,
+        distance > 160,
+      );
+    } else if (ocrResult.words.length) {
+      addLog(`${target.pseudo} · OCR sans correspondance`, `Le libellé « ${label} » n’a pas été relu dans la capture; la détection DOM exacte est conservée.`);
+    }
     const description = `Cible : ${target.pseudo}\nCliquer une fois sur le lien complet « ${label} »${match.href ? ` (${match.href})` : ""}.`;
     if ((confirmClicksInput.checked || ALWAYS_CONFIRM_RE.test(label)) && !(await askConfirmation(description))) {
       addLog(`${target.pseudo} · clic ignoré`, `Lien « ${label} »`);
-      return;
+      return { status: "skipped", proxyActive };
     }
-    if (stopRequested) return;
+    if (stopRequested) return { status: "skipped", proxyActive };
 
-    try {
-      if (rotatingProxyConfig) {
-        proxyRecovery = await activateRotatingProxy(rotatingProxyConfig);
-        if (stopRequested) return;
-        addLog(`${target.pseudo} · gateway Webshare actif`, "Le proxy du profil est activé pour ce clic et sa redirection.");
-      }
-      const redirectsBeforeClick = redirectCount;
-      const openedTabPromise = waitForOpenedTab(activePageTabId, (childTab) => {
-        childTabIds.push(childTab.id);
-        monitoredTabIds.add(childTab.id);
-      });
-      await clickAt(activePageTabId, match.x, match.y);
-      const openedTab = await openedTabPromise;
-      addLog(`${target.pseudo} · lien cliqué`, `« ${label} »${match.href ? ` → ${match.href}` : ""}`);
-      if (openedTab) {
-        activeTabId = openedTab.id;
-        finalTab = await waitForStableUrl(openedTab.id, false);
-      } else {
-        await waitForStableUrl(activePageTabId);
-        finalTab = await chromeCall(chrome.tabs.get, activePageTabId);
-      }
-      currentUrlNode.textContent = finalTab.url || "";
-      const redirectsAfterClick = redirectCount - redirectsBeforeClick;
-      addLog(
-        `${target.pseudo} · redirection après clic`,
-        `${redirectsAfterClick ? `${redirectsAfterClick} redirection(s)` : "URL stabilisée sans redirection détectée"}\n→ ${finalTab.url || "URL inconnue"}${openedTab ? " · nouvel onglet temporaire" : ""}`,
-      );
-      if (!openedTab) {
-        try { renderScreenshot(await captureScreen(activePageTabId)); } catch { /* la page peut se fermer pendant la navigation */ }
-      }
-    } finally {
-      if (proxyRecovery) {
-        try {
-          await restoreRotatingProxy(proxyRecovery);
-          proxyRecovery = null;
-          addLog(`${target.pseudo} · proxy restauré`, "Les paramètres proxy précédents de Chrome ont été rétablis.");
-        } catch (error) {
-          addLog("Restauration du proxy Chrome échouée", error.message, true);
-          throw error;
-        }
-      }
+    const redirectsBeforeClick = redirectCount;
+    const openedTabPromise = waitForOpenedTab(activePageTabId, (childTab) => {
+      childTabIds.push(childTab.id);
+      monitoredTabIds.add(childTab.id);
+    });
+    await clickAt(activePageTabId, match.x, match.y);
+    clicked = true;
+    const openedTab = await openedTabPromise;
+    addLog(`${target.pseudo} · lien cliqué`, `« ${label} »${match.href ? ` → ${match.href}` : ""}`);
+    if (openedTab) {
+      activeTabId = openedTab.id;
+      finalTab = await waitForStableUrl(openedTab.id, false);
+    } else {
+      await waitForStableUrl(activePageTabId);
+      finalTab = await chromeCall(chrome.tabs.get, activePageTabId);
+    }
+    currentUrlNode.textContent = finalTab.url || "";
+    const redirectsAfterClick = redirectCount - redirectsBeforeClick;
+    addLog(
+      `${target.pseudo} · redirection après clic`,
+      `${redirectsAfterClick ? `${redirectsAfterClick} redirection(s)` : "URL stabilisée sans redirection détectée"}\n→ ${finalTab.url || "URL inconnue"}${openedTab ? " · nouvel onglet temporaire" : ""}`,
+    );
+    if (!openedTab) {
+      try { renderScreenshot(await captureScreen(activePageTabId)); } catch { /* la page peut se fermer pendant la navigation */ }
     }
     if (!stopRequested) addLog(`${target.pseudo} · cycle terminé`, "Lien cliqué et redirection attendue.");
+    return { status: "success", proxyActive };
+  } catch (error) {
+    failure = error;
+    throw error;
   } finally {
-    if (proxyRecovery || rotatingProxyConfig) {
+    if (proxyRecovery || proxyActive) {
       try {
         const restored = await restoreTemporaryProxyIfNeeded(proxyRecovery);
         proxyRecovery = null;
@@ -741,7 +1345,22 @@ async function processTarget(target, runIndex, runCount, windowId, rotatingProxy
     }
     activeTabId = null;
     currentUrlNode.textContent = "Onglet fermé";
+    if (failure && useProxy) {
+      // Attribution : une activation impossible ou un échec avant le clic (page non
+      // chargée, tunnel refusé) est imputé au proxy. Après le clic, l'échec n'est
+      // imputé au proxy que si le message trahit un problème réseau/proxy.
+      const blameProxy = !proxyApplied
+        ? proxyActivationAttempted
+        : (!clicked || errorLooksLikeProxyFailure(failure));
+      failure.proxyActive = blameProxy;
+      if (blameProxy) failure.proxyError = String(failure.message || "Échec du cycle.").slice(0, 200);
+    }
   }
+}
+
+function errorLooksLikeProxyFailure(error) {
+  return /ERR_PROXY|ERR_TUNNEL|ERR_CONNECTION|ERR_NAME_NOT_RESOLVED|ERR_EMPTY_RESPONSE|ERR_TIMED_OUT|ERR_INTERNET_DISCONNECTED|proxy/i
+    .test(String(error && error.message ? error.message : error));
 }
 
 async function activateRotatingProxy(config) {
@@ -879,14 +1498,121 @@ function normalizeLinkLabel(value) {
     .trim();
 }
 
+/**
+ * Démarre (ou réutilise) le worker Tesseract.js local.
+ * Tout est servi depuis extension/vendor/ : aucune requête réseau, aucun script distant,
+ * workerBlobURL désactivé car la CSP MV3 (worker-src 'self') refuse les workers blob:.
+ */
+function ensureOcrWorker(requestedLanguage) {
+  const language = normalizeOcrLanguage(requestedLanguage);
+  if (ocrWorker && loadedLanguage === language && ocrWorkerState === "ready") return Promise.resolve(ocrWorker);
+  if (ocrReadyPromise) {
+    if (ocrStartingLanguage === language) return ocrReadyPromise;
+    return ocrReadyPromise.catch(() => {}).then(() => ensureOcrWorker(language));
+  }
+  ocrStartingLanguage = language;
+  ocrReadyPromise = startOcrWorker(language).finally(() => {
+    ocrReadyPromise = null;
+    ocrStartingLanguage = "";
+  });
+  return ocrReadyPromise;
+}
+
+async function startOcrWorker(language) {
+  await shutdownOcrWorker("");
+  if (typeof Tesseract === "undefined" || typeof Tesseract.createWorker !== "function") {
+    throw new Error("Le moteur OCR local est introuvable : extension/vendor/tesseract.min.js n’a pas été chargé.");
+  }
+  if (typeof Worker === "undefined") {
+    throw new Error("Les Web Workers sont indisponibles : impossible de lancer l’OCR local.");
+  }
+  setOcrWorkerStatus(`Démarrage du moteur OCR local (${language})…`);
+  const assetBase = typeof chrome !== "undefined" && chrome.runtime?.getURL
+    ? chrome.runtime.getURL(OCR_ASSET_BASE)
+    : OCR_ASSET_BASE;
+  const options = buildOcrWorkerOptions(assetBase);
+  options.logger = (message) => {
+    if (!message || typeof message.progress !== "number") return;
+    if (!/loading|initializ|recogni/i.test(message.status || "")) return;
+    setOcrWorkerStatus(`${message.status} · ${Math.round(message.progress * 100)} % (${language})`);
+  };
+  let worker;
+  try {
+    worker = await Tesseract.createWorker(language, Tesseract.OEM.LSTM_ONLY, options);
+  } catch (error) {
+    const detail = String(error && error.message ? error.message : error);
+    const hint = /worker|importscripts|blob|fetch|network|csp/i.test(detail)
+      ? " Vérifie que extension/vendor/ contient worker.min.js, tesseract-core-*.wasm.js et lang-data/*.traineddata.gz, puis recharge l’extension."
+      : "";
+    throw new Error(`Le moteur OCR local n’a pas pu démarrer (${detail})${hint}`);
+  }
+  if (!worker || typeof worker.recognize !== "function") {
+    throw new Error("Le worker OCR ne répond pas correctement.");
+  }
+  try {
+    await worker.setParameters({ preserve_interword_spaces: "1" });
+  } catch { /* paramètre optionnel */ }
+  ocrWorker = worker;
+  loadedLanguage = language;
+  ocrWorkerState = "ready";
+  setOcrWorkerStatus(`Moteur OCR prêt (${language}, local).`);
+  return worker;
+}
+
+async function shutdownOcrWorker(reason = "", message = "") {
+  const worker = ocrWorker;
+  ocrWorker = null;
+  loadedLanguage = "";
+  ocrWorkerState = "idle";
+  if (worker) {
+    try { await worker.terminate(); } catch { /* worker déjà arrêté */ }
+  }
+  if (message) setOcrWorkerStatus(message);
+  else setOcrWorkerStatus(reason ? `Moteur OCR arrêté (${reason}).` : "Moteur OCR arrêté.");
+}
+
+function setOcrWorkerStatus(text) {
+  if (ocrWorkerStatusNode) ocrWorkerStatusNode.textContent = text;
+}
+
+function base64ToBlob(base64, type) {
+  const binary = atob(String(base64 || ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type });
+}
+
+/**
+ * Lit l’écran via Tesseract.js et renvoie le texte, les mots avec leur boîte
+ * et la taille réelle de l’image (les coordonnées TSV y sont exprimées).
+ */
 async function readScreen(base64) {
-  if (!ocrWorker) throw new Error("Le moteur OCR local n'est pas initialisé.");
-  const result = await ocrWorker.recognize(
-    `data:image/jpeg;base64,${base64}`,
-    {},
-    { tsv: true },
-  );
-  return { text: result.data.text || "", words: parseTsv(result.data.tsv || "") };
+  if (!ocrWorker || ocrWorkerState !== "ready") {
+    throw new Error("Le moteur OCR local n’est pas initialisé.");
+  }
+  const blob = base64ToBlob(base64, "image/jpeg");
+  let width = 0;
+  let height = 0;
+  try {
+    const bitmap = await createImageBitmap(blob);
+    width = bitmap.width;
+    height = bitmap.height;
+    bitmap.close?.();
+  } catch { /* dimensions facultatives, l’échelle vaudra 1 */ }
+
+  ocrWorkerState = "busy";
+  try {
+    // Output explicite : sans `text`, Tesseract v6 ne renvoie pas result.data.text.
+    const result = await ocrWorker.recognize(blob, {}, { text: true, tsv: true });
+    return {
+      text: String(result?.data?.text || ""),
+      words: parseTsv(String(result?.data?.tsv || "")),
+      width,
+      height,
+    };
+  } finally {
+    ocrWorkerState = "ready";
+  }
 }
 
 function parseTsv(tsv) {
