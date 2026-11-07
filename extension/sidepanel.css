@@ -25,6 +25,10 @@ input:disabled, select:disabled { background: #eef2f5; color: #78858e; }
 .space-top { margin-top: 12px; }
 .hint { margin: 6px 0 0; color: #73818a; font-size: 10px; line-height: 1.5; }
 .options-card select { margin-bottom: 12px; }
+.proxy-toggle { margin-top: 10px; }
+.proxy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 10px; }
+.proxy-field-wide { grid-column: 1 / -1; }
+.proxy-grid label { margin-bottom: 5px; }
 .number-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 .number-grid label { min-height: 15px; }
 .section-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
