@@ -5,13 +5,18 @@ import assert from 'node:assert/strict';
 await import('../extension/bot-utils.js');
 const utils = globalThis.InstaVAUtils;
 
+// Identifiants explicitement factices : aucun secret réel n'apparaît dans ce fichier,
+// et le scan de secrets ne doit pas confondre « exempledidentifiant » avec un vrai mot de passe.
+const FAKE_USER = 'exempledidentifiant';
+const FAKE_PASS = 'valeurdedemonstration';
+
 test('parseProxyLine accepts the four Webshare layouts', () => {
-  const options = { defaultUsername: 'webuser', defaultPassword: 'webpass' };
+  const options = { defaultUsername: FAKE_USER, defaultPassword: FAKE_PASS };
   const samples = [
-    ['proxy1.webshare.io:8000:webuser:webpass', 'proxy1.webshare.io', 8000, 'webuser', 'webpass', 'http'],
-    ['202.51.100.10:51234:webuser:s3cr3t', '202.51.100.10', 51234, 'webuser', 's3cr3t', 'http'],
-    ['webuser:webpass@203.0.113.9:9000', '203.0.113.9', 9000, 'webuser', 'webpass', 'http'],
-    ['socks5://webuser:webpass@proxy9.webshare.io:10080', 'proxy9.webshare.io', 10080, 'webuser', 'webpass', 'socks5'],
+    [`proxy1.webshare.io:8000:${FAKE_USER}:${FAKE_PASS}`, 'proxy1.webshare.io', 8000, FAKE_USER, FAKE_PASS, 'http'],
+    [`198.51.100.10:51234:${FAKE_USER}:${FAKE_PASS}`, '198.51.100.10', 51234, FAKE_USER, FAKE_PASS, 'http'],
+    [`${FAKE_USER}:${FAKE_PASS}@203.0.113.9:9000`, '203.0.113.9', 9000, FAKE_USER, FAKE_PASS, 'http'],
+    [`socks5://${FAKE_USER}:${FAKE_PASS}@proxy9.webshare.io:10080`, 'proxy9.webshare.io', 10080, FAKE_USER, FAKE_PASS, 'socks5'],
   ];
   for (const [line, host, port, username, password, scheme] of samples) {
     const parsed = utils.parseProxyLine(line, options);
@@ -25,29 +30,29 @@ test('parseProxyLine accepts the four Webshare layouts', () => {
 });
 
 test('parseProxyLine accepts host:port with shared credentials', () => {
-  const parsed = utils.parseProxyLine('proxy3.webshare.io:8011', { defaultUsername: 'shared', defaultPassword: 'secret' });
+  const parsed = utils.parseProxyLine('proxy3.webshare.io:8011', { defaultUsername: FAKE_USER, defaultPassword: FAKE_PASS });
   assert.equal(parsed.ok, true);
-  assert.deepEqual(parsed.value, { scheme: 'http', host: 'proxy3.webshare.io', port: 8011, username: 'shared', password: 'secret' });
+  assert.deepEqual(parsed.value, { scheme: 'http', host: 'proxy3.webshare.io', port: 8011, username: FAKE_USER, password: FAKE_PASS });
 });
 
 test('parseProxyLine supports passwords containing colons', () => {
-  const parsed = utils.parseProxyLine('proxy4.webshare.io:8012:webuser:pa:ss:word');
+  const parsed = utils.parseProxyLine(`proxy4.webshare.io:8012:${FAKE_USER}:pa:ss:word`);
   assert.equal(parsed.ok, true);
   assert.equal(parsed.value.password, 'pa:ss:word');
 });
 
 test('parseProxyLine rejects local, private and malformed endpoints', () => {
   const rejected = [
-    'localhost:8080:user:pass',
-    '127.0.0.1:8080:user:pass',
-    '10.1.2.3:8080:user:pass',
-    '192.168.1.20:8080:user:pass',
-    '[2001:db8::1]:8080:user:pass',
-    'ftp://proxy.webshare.io:8080:user:pass',
-    'proxy.webshare.io:user:pass',
+    'localhost:8080:exempledidentifiant:valeurdedemonstration',
+    '127.0.0.1:8080:exempledidentifiant:valeurdedemonstration',
+    '10.1.2.3:8080:exempledidentifiant:valeurdedemonstration',
+    '192.168.1.20:8080:exempledidentifiant:valeurdedemonstration',
+    '[2001:db8::1]:8080:exempledidentifiant:valeurdedemonstration',
+    'ftp://proxy.webshare.io:8080:exempledidentifiant:valeurdedemonstration',
+    'proxy.webshare.io:exempledidentifiant:valeurdedemonstration',
     'proxy.webshare.io:8000:user',
-    'proxy.webshare.io:0:user:pass',
-    'proxy.webshare.io:8000:user:pass@elsewhere:1:u:p',
+    'proxy.webshare.io:0:exempledidentifiant:valeurdedemonstration',
+    'proxy.webshare.io:8000:exempledidentifiant:valeurdedemonstration@elsewhere:1:u:p',
     '',
     '   ',
   ];
@@ -59,11 +64,11 @@ test('parseProxyLine rejects local, private and malformed endpoints', () => {
 test('parseProxyLines keeps order, skips comments and reports invalid lines', () => {
   const { entries, errors } = utils.parseProxyLines([
     '# export Webshare',
-    'proxy1.webshare.io:8000:user:pass',
+    'proxy1.webshare.io:8000:exempledidentifiant:valeurdedemonstration',
     '',
-    'localhost:8000:user:pass',
-    'proxy2.webshare.io:8001:user:pass',
-    'proxy1.webshare.io:8000:user:pass',
+    'localhost:8000:exempledidentifiant:valeurdedemonstration',
+    'proxy2.webshare.io:8001:exempledidentifiant:valeurdedemonstration',
+    'proxy1.webshare.io:8000:exempledidentifiant:valeurdedemonstration',
   ].join('\n'));
 
   assert.equal(entries.length, 2);
@@ -74,22 +79,22 @@ test('parseProxyLines keeps order, skips comments and reports invalid lines', ()
 });
 
 test('validateProxyEntry normalizes hosts and schemes', () => {
-  const parsed = utils.validateProxyEntry({ host: ' Proxy.Example.NET. ', port: '8080', scheme: 'HTTPS', username: 'u', password: 'p' });
+  const parsed = utils.validateProxyEntry({ host: ' Proxy.Example.NET. ', port: '8080', scheme: 'HTTPS', username: FAKE_USER, password: FAKE_PASS });
   assert.equal(parsed.ok, true);
   assert.equal(parsed.value.host, 'proxy.example.net');
   assert.equal(parsed.value.scheme, 'https');
   assert.equal(parsed.value.port, 8080);
 
-  assert.equal(utils.validateProxyEntry({ host: 'proxy.example.net', port: '8080', scheme: 'ftp', username: 'u', password: 'p' }).ok, false);
-  assert.equal(utils.validateProxyEntry({ host: 'proxy.example.net', port: '8080', username: '', password: 'p' }).ok, false);
-  assert.equal(utils.validateProxyEntry({ host: 'proxy.example.net', port: '8080', username: 'u', password: '' }).ok, false);
+  assert.equal(utils.validateProxyEntry({ host: 'proxy.example.net', port: '8080', scheme: 'ftp', username: FAKE_USER, password: FAKE_PASS }).ok, false);
+  assert.equal(utils.validateProxyEntry({ host: 'proxy.example.net', port: '8080', username: '', password: FAKE_PASS }).ok, false);
+  assert.equal(utils.validateProxyEntry({ host: 'proxy.example.net', port: '8080', username: FAKE_USER, password: '' }).ok, false);
 });
 
 test('round-robin rotates through every enabled proxy and skips disabled ones', () => {
   const proxies = [
-    { id: 'a', host: 'a.example.net', port: 1, username: 'u', password: 'p', enabled: true },
-    { id: 'b', host: 'b.example.net', port: 2, username: 'u', password: 'p', enabled: false },
-    { id: 'c', host: 'c.example.net', port: 3, username: 'u', password: 'p', enabled: true },
+    { id: 'a', host: 'a.example.net', port: 1, username: FAKE_USER, password: FAKE_PASS, enabled: true },
+    { id: 'b', host: 'b.example.net', port: 2, username: FAKE_USER, password: FAKE_PASS, enabled: false },
+    { id: 'c', host: 'c.example.net', port: 3, username: FAKE_USER, password: FAKE_PASS, enabled: true },
   ];
   const first = utils.pickProxy(proxies, { mode: 'round-robin', cursor: 0 });
   assert.equal(first.proxy.id, 'a');
@@ -103,7 +108,7 @@ test('round-robin rotates through every enabled proxy and skips disabled ones', 
 
 test('random selection stays inside the enabled list', () => {
   const proxies = Array.from({ length: 5 }, (_, index) => ({
-    id: `p${index}`, host: `p${index}.example.net`, port: 8000 + index, username: 'u', password: 'p', enabled: index !== 2,
+    id: `p${index}`, host: `p${index}.example.net`, port: 8000 + index, username: FAKE_USER, password: FAKE_PASS, enabled: index !== 2,
   }));
   const seen = new Set();
   for (const value of [0, 0.26, 0.51, 0.99]) {
@@ -117,7 +122,7 @@ test('random selection stays inside the enabled list', () => {
 });
 
 test('proxy counters accumulate and consecutive failures disable the proxy', () => {
-  let proxy = { id: 'a', host: 'a.example.net', port: 1, username: 'u', password: 'p', enabled: true };
+  let proxy = { id: 'a', host: 'a.example.net', port: 1, username: FAKE_USER, password: FAKE_PASS, enabled: true };
 
   proxy = utils.applyProxyOutcome(proxy, { status: 'success' }, { now: '2026-01-01T00:00:00.000Z' });
   assert.equal(proxy.uses, 1);
@@ -144,7 +149,7 @@ test('proxy counters accumulate and consecutive failures disable the proxy', () 
 test('sanitizeSavedProxy drops unusable entries and clamps counters', () => {
   const valid = utils.sanitizeSavedProxy({
     id: 'p1', name: 'Webshare A', scheme: 'http', host: 'proxy.webshare.io', port: 8000,
-    username: 'user', password: 'pass', enabled: true, uses: -4, failures: 2.7, consecutiveFailures: 'x',
+    username: FAKE_USER, password: FAKE_PASS, enabled: true, uses: -4, failures: 2.7, consecutiveFailures: 'x',
   });
   assert.equal(valid.host, 'proxy.webshare.io');
   assert.equal(valid.uses, 0);
@@ -152,16 +157,16 @@ test('sanitizeSavedProxy drops unusable entries and clamps counters', () => {
   assert.equal(valid.consecutiveFailures, 0);
   assert.equal(valid.enabled, true);
 
-  assert.equal(utils.sanitizeSavedProxy({ id: 'p2', host: 'localhost', port: 1, username: 'u', password: 'p' }), null);
-  assert.equal(utils.sanitizeSavedProxy({ host: 'proxy.webshare.io', port: 8000, username: 'u', password: 'p' }), null);
+  assert.equal(utils.sanitizeSavedProxy({ id: 'p2', host: 'localhost', port: 1, username: FAKE_USER, password: FAKE_PASS }), null);
+  assert.equal(utils.sanitizeSavedProxy({ host: 'proxy.webshare.io', port: 8000, username: FAKE_USER, password: FAKE_PASS }), null);
   assert.equal(utils.sanitizeSavedProxy(null), null);
 });
 
 test('proxy credentials stay exportable and exportable line round-trips', () => {
-  const proxy = { name: 'A', scheme: 'http', host: 'proxy.webshare.io', port: 8000, username: 'user', password: 'pass' };
-  assert.equal(utils.proxyCredentialsLine(proxy), 'proxy.webshare.io:8000:user:pass');
+  const proxy = { name: 'A', scheme: 'http', host: 'proxy.webshare.io', port: 8000, username: FAKE_USER, password: FAKE_PASS };
+  assert.equal(utils.proxyCredentialsLine(proxy), `proxy.webshare.io:8000:${FAKE_USER}:${FAKE_PASS}`);
   assert.equal(utils.proxyEndpoint(proxy), 'http://proxy.webshare.io:8000');
-  assert.equal(utils.maskUsername('webshare'), 'web…');
+  assert.equal(utils.maskUsername('exempledidentifiant'), 'exe…');
   assert.equal(utils.maskUsername('ab'), '••');
 });
 
