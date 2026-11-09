@@ -1,8 +1,20 @@
-# InstaVA — extension Chrome et PWA mobile
+# InstaVA — bot autonome sur VPS, extension Chrome et PWA mobile
 
 L’extension Chrome MV3 de bureau enregistre et lance des cibles URL. Chaque cycle suit un enchaînement fixe — ouvrir l’URL, attendre la stabilisation, cliquer sur le lien ou le bouton indiqué, attendre sa redirection — puis se répète selon le mode choisi. Il n’y a pas de workflow à construire. Les fiches (pseudo, URL, libellé de lien ou de bouton facultatif, nombre de visites, mode et durée) restent dans `chrome.storage.local`. Dans ce mode local, aucun serveur d’automatisation n’est appelé; si l’option proxy est activée, le clic et sa redirection passent par le gateway Webshare fourni par l’utilisateur.
 
-Une PWA distincte est fournie pour l’utilisation depuis l’écran d’accueil d’un iPhone ou d’un téléphone Android. Comme les extensions MV3 ne s’installent pas directement dans Chrome mobile, la PWA délègue les cycles à un navigateur Chromium distant et à un worker planifié. Les URL et libellés y sont donc traités par le serveur configuré.
+Le dépôt contient **deux façons d’exécuter le même bot**, avec les mêmes règles :
+
+| | Extension Chrome | Bot autonome sur VPS |
+|---|---|---|
+| Où tourne Chromium | ton ordinateur de bureau | ton serveur, 24 h/24 |
+| Contrôle depuis le téléphone | non (les extensions MV3 ne s’installent pas sur Chrome mobile) | **oui**, via une PWA installable |
+| Comptes et données | `chrome.storage.local` | base SQLite sur le VPS |
+| Identifiants proxy | `chrome.storage.local` | chiffrés AES-256-GCM sur le disque |
+| Dépendance externe | aucune | aucune |
+
+Les deux appliquent les mêmes règles : durée en **jours**, clic sur **lien ou bouton** quel que soit le libellé, et **au moins 100 clics par jour** (288 maximum par cible et par jour, écart minimum de 5 minutes).
+
+**Pour l’installation sur un VPS, suis [DEPLOY.md](DEPLOY.md)** : Docker Compose avec Caddy et HTTPS automatique, ou service systemd, variante Tailscale sans domaine, sauvegardes et dépannage.
 
 Le moteur Tesseract.js/WASM et les données française/anglaise sont inclus dans `extension/vendor/`. Les captures et l’OCR restent dans Chrome. L’extension ne lance pas de navigateur séparé et n’exige pas de port de débogage.
 
@@ -46,25 +58,77 @@ Le worker Tesseract.js est démarré à la demande par `ensureOcrWorker()`, serv
 
 Les tests Node couvrent la liste de proxys (analyse des lignes, import, rotation, compteurs, désactivation automatique), le rythme quotidien (quota de 100 clics/jour, plafond de 288, répartition sur les jours, journal), la configuration du worker OCR et la cohérence du câblage de l’extension (appel de fonction non déclarée, identifiants HTML, chargement des scripts, ressources du manifeste) : `npm test`.
 
-## Adaptation mobile (iPhone et Android)
+## Bot autonome sur VPS et contrôle depuis le téléphone
 
-La PWA se trouve dans `public/` (`index.html`, `app.js`, `styles.css`, manifeste, icônes et service worker); Vercel publie ce dossier comme sortie statique. Sur iPhone, ouvre l’URL de l’application dans Safari puis **Partager → Sur l’écran d’accueil**. Sur Android, ouvre-la dans Chrome puis choisis **Installer l’application** ou **Ajouter à l’écran d’accueil**. L’interface reste utilisable dans un navigateur mobile même sans installation.
+L’extension MV3 ne s’installe pas dans Chrome mobile. Pour piloter le bot depuis un iPhone ou un Android, le dépôt fournit un **serveur autonome** (`server/`) qui exécute les cycles jour et nuit et sert une **PWA installable**.
 
-Le serveur (`api/`) fournit l’authentification Supabase, la gestion des cibles, la planification, les confirmations et l’exécution Playwright/Chromium. Les secrets Webshare ne sont jamais renvoyés au navigateur : l’API les écrit dans Supabase Vault et les déchiffre uniquement au moment d’un cycle. Dans le worker distant, le proxy s’applique à toute la visite du navigateur (ouverture, ressources, clic et redirection); il ne peut pas être basculé uniquement autour du clic comme dans l’extension locale. L’application utilise toujours le cycle fixe : ouvrir l’URL, attendre la stabilisation, rechercher un lien `a[href]` ou `role=link` visible dont le libellé complet correspond (casse, accents et espaces normalisés), ne cliquer que si la correspondance est unique, puis attendre une redirection. Aucun mot de passe de site ni code secret n’est saisi. Les liens sensibles ou l’option de confirmation activée exigent une validation explicite dans l’app.
+### Ce que fait le serveur
 
-Côté serveur, les paramètres par cible restent ceux d’avant cette évolution (le bot local et la PWA ne partagent pas encore le même moteur) : nombre réel tiré entre `max(1, N−10)` et `N+10`, premier cycle dû dès le lancement, durée indépendante de 1 à 52 semaines, délai minimum de cinq minutes entre deux cycles d’une même cible et maximum de 300 visites potentielles par lancement. Le quota de 100 clics par jour, la durée en jours et le clic sur bouton ne s’appliquent pour l’instant qu’à l’extension de bureau. Une seule session cloud active est autorisée par compte à la fois. Les visites non traitées restent en file côté serveur lorsque l’app est fermée. Une exécution déjà en cours peut terminer après la demande d’arrêt; les visites en attente sont annulées.
+- **Exécution** : Playwright ouvre l’URL de la cible, attend la stabilisation, clique le **lien ou le bouton** dont le libellé correspond exactement (ou l’élément principal si le libellé est vide), puis attend la redirection.
+- **Planification** : une boucle interne vérifie les visites dues toutes les 5 secondes. Aucun cron externe n’est nécessaire.
+- **Rythme** : chaque visite réussie est comptée dans un **journal quotidien** (`daily_clicks`). Le bot tient au moins **100 clics par jour** par cible sur la durée choisie, plafonne à **288 clics par jour** (5 minutes d’écart) et rattrape le lendemain une journée manquée, dans la limite de 100 clics.
+- **Données** : base **SQLite** dans `DATA_DIR` (`node:sqlite`, aucune dépendance native à compiler). Les visites et l’historique sont consultables depuis l’application.
+- **Comptes** : inscription locale, mots de passe hachés avec **scrypt**, sessions opaques en cookie `HttpOnly`/`SameSite=Strict`/`Secure`, dont seul le SHA-256 est stocké.
+- **Proxy** : identifiants Webshare obligatoires pour activer le proxy, chiffrés **AES-256-GCM** sur le disque, jamais renvoyés au navigateur ni journalisés.
+- **Sécurité réseau** : chaque URL chargée (navigation, sous-ressources, destination du clic) est vérifiée ; les adresses privées et locales sont bloquées en permanence.
 
-### Déploiement requis
+### L’application mobile
 
-Le dépôt contient le frontend et les fonctions, mais **aucun déploiement cloud ni aucune migration n’est exécuté automatiquement**. Pour activer la PWA, un projet Supabase et un projet d’hébergement serverless doivent être explicitement choisis et configurés. Applique `supabase/migrations/202611070001_create_instava_mobile_runner.sql` au projet Supabase choisi, puis définis ces variables côté serveur de l’hébergeur (jamais dans Git ni dans les champs client) :
+La PWA de `public/` sert d’écran de contrôle : connexion, création et modification des cibles, choix du mode (intervalle en jours ou objectif), lancement, arrêt, bouton **Confirmer & cliquer** pour les clics sensibles, et le **journal quotidien** en barres montrant les 14 derniers jours.
 
-- `SUPABASE_URL` — URL du projet Supabase.
-- `SUPABASE_ANON_KEY` — clé publique/publishable Supabase; elle est exposée par `/api/config` pour l’authentification du navigateur.
-- `SUPABASE_SERVICE_ROLE_KEY` — clé secrète Supabase réservée au serveur; elle ne doit jamais être exposée au navigateur.
-- `CRON_SECRET` — valeur aléatoire forte; Vercel Cron doit l’envoyer dans `Authorization: Bearer …`.
+Sur iPhone : Safari → Partager → *Sur l’écran d’accueil*. Sur Android : Chrome → menu ⋮ → *Installer l’application*. La page se rafraîchit toutes les 15 secondes quand elle est visible ; le bot, lui, continue de tourner quand l’application est fermée.
 
-Les comptes mobiles utilisent Supabase Auth par e-mail et mot de passe; selon la configuration Auth, une confirmation par e-mail peut être nécessaire. Le coffre de secrets utilise l’extension `supabase_vault` et des fonctions SQL limitées au rôle `service_role`. Ne colle jamais les identifiants Webshare dans le dépôt, un ticket ou le chat : saisis-les dans le formulaire Webshare de la PWA.
+### Configuration
 
-`vercel.json` demande un passage de worker toutes les cinq minutes. Cette cadence est nécessaire pour garder une capacité suffisante et réduire les retards, mais Vercel Hobby impose une fréquence minimale de 15 minutes et du jitter; il ne satisfait donc pas cette cadence. Le projet candidat et son plan doivent être vérifiés avant le déploiement, et un plan compatible (ou un worker externe équivalent) peut avoir un coût. Le worker ne rend pas les horaires en arrière-plan aussi précis qu’une tâche locale toujours active : les heures dues sont respectées avec retard si l’hébergeur tarde. Le premier cycle de jusqu’à deux cibles sélectionnées est tenté par la requête de lancement; les autres premières visites sont immédiatement mises en file.
+Toutes les variables sont décrites dans [`.env.example`](.env.example). Les plus importantes :
 
-Pour les tests syntaxiques du dépôt, exécute `npm run check`. Le lancement local nécessite les variables serveur ci-dessus et un runtime Vercel compatible. Aucun identifiant utilisateur ou compte Webshare n’est fourni avec le dépôt.
+| Variable | Rôle | Défaut |
+|---|---|---|
+| `INSTAVA_DOMAIN` | domaine servi par Caddy (Docker) | — (obligatoire) |
+| `DATA_DIR` | base SQLite et `secret.key` | `./data` |
+| `INSTAVA_TZ` | fuseau des quotas quotidiens | `Africa/Porto-Novo` |
+| `INSTAVA_SECRET_KEY` | clé de chiffrement des proxys | générée au premier démarrage |
+| `INSTAVA_SIGNUP_CODE` | code d’invitation à l’inscription | vide (inscriptions ouvertes) |
+| `INSTAVA_CONCURRENCY` | cycles Chromium simultanés | `2` |
+
+### Installation
+
+Tout est détaillé dans **[DEPLOY.md](DEPLOY.md)** : préparation du VPS, Docker Compose, Caddy et HTTPS automatique, variante systemd, mode Tailscale sans domaine, sauvegardes et dépannage.
+
+En résumé, sur un VPS avec un domaine pointé vers lui :
+
+```bash
+git clone https://github.com/IsholaRsk/INSTA_VA.git /opt/instava
+cd /opt/instava && cp .env.example .env && nano .env
+docker compose up -d --build
+```
+
+Puis ouvre `https://bot.tondomaine.fr` depuis le téléphone et crée le compte propriétaire.
+
+### Développement local
+
+```bash
+npm ci
+DATA_DIR=./data INSTAVA_LOG_LEVEL=debug npm start
+```
+
+`http://localhost:8080` sert l’application ; les données restent dans `./data` (ignoré par Git). Sans Chromium installé, l’interface et l’API fonctionnent, mais les cycles échouent au lancement du navigateur : `npx playwright install --with-deps chromium` pour l’activer.
+
+### Tests
+
+```bash
+npm test     # 55+ tests : API, moteur, planification, chiffrement, sécurité
+npm run check  # vérification syntaxique de tous les fichiers
+```
+
+## Ancienne architecture (Vercel + Supabase) — conservée pour référence
+
+Les dossiers `api/`, `lib/`, `supabase/` et `vercel.json` correspondent à la version précédente : fonctions serverless sur Vercel, authentification et base sur Supabase, secrets proxy dans Supabase Vault, cron `*/5 * * * *`.
+
+**Ils ne sont plus utilisés par le bot.** Le serveur autonome de `server/` remplace l’ensemble : base SQLite, comptes locaux, chiffrement AES-256-GCM sur disque et planificateur interne toutes les 5 secondes (plus précis qu’un cron Vercel, et sans limite de plan d’hébergement).
+
+Ces fichiers restent dans le dépôt pour que l’historique soit lisible et pour faciliter une éventuelle migration de données depuis Supabase. Si tu ne t’en sers pas, tu peux les supprimer sans impact sur le bot.
+
+> La migration SQL `supabase/migrations/202611070001_create_instava_mobile_runner.sql` n’est **plus nécessaire** : le schéma SQLite est créé automatiquement au premier démarrage du serveur.
+
+Pour les tests syntaxiques du dépôt, exécute `npm run check`. Aucun identifiant utilisateur ou compte Webshare n’est fourni avec le dépôt.

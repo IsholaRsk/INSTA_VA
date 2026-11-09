@@ -32,7 +32,7 @@
         <div class="intro-card">
           <p class="eyebrow">PWA · iPhone · Android</p>
           <h1>Votre bot,<br><span>dans votre poche.</span></h1>
-          <p class="intro-copy">Gérez des cycles simples depuis votre téléphone. Le navigateur distant ouvre une URL, attend sa stabilisation, puis clique uniquement sur un lien visible unique correspondant au libellé.</p>
+          <p class="intro-copy">Votre bot tourne sur votre VPS, jour et nuit. Depuis votre téléphone, vous lancez les cibles et suivez chaque clic : le navigateur distant ouvre l’URL, attend la stabilisation, puis clique le lien ou le bouton correspondant au libellé.</p>
           <div class="install-note">
             <span class="install-symbol">＋</span>
             <div><strong>Ajoutez l’app à l’écran d’accueil</strong><p>iPhone : Partager → Sur l’écran d’accueil. Android : menu du navigateur → Installer l’application.</p></div>
@@ -48,10 +48,14 @@
             <input id="auth-email" type="email" autocomplete="email" inputmode="email" required maxlength="254" placeholder="vous@exemple.com">
             <label for="auth-password">Mot de passe</label>
             <input id="auth-password" type="password" autocomplete="current-password" required minlength="8" maxlength="128" placeholder="8 caractères minimum">
+            <div class="field hidden" id="signup-code-field">
+              <label for="signup-code">Code d’invitation</label>
+              <input id="signup-code" type="text" maxlength="128" autocomplete="off" placeholder="Fourni par le propriétaire du VPS">
+            </div>
             <button id="auth-submit" class="button button-primary full-width" type="submit">Se connecter</button>
           </form>
           <p id="auth-message" class="form-message" aria-live="polite"></p>
-          <p class="fine-print">Vos URL et libellés sont transmis au serveur d’exécution. Les identifiants Webshare, si vous les configurez, sont conservés dans le coffre chiffré de Supabase.</p>
+          <p class="fine-print">Tout reste sur votre VPS : comptes, cibles et historique dans une base SQLite, identifiants Webshare chiffrés AES-256-GCM. Aucun service cloud externe.</p>
         </div>
       </section>
 
@@ -78,18 +82,26 @@
                 <input id="target-url" type="text" inputmode="url" maxlength="2048" autocomplete="url" required placeholder="https://exemple.com/page">
               </div>
               <div class="field full-field">
-                <label for="target-label">Libellé exact du lien visible</label>
-                <input id="target-label" type="text" maxlength="100" required placeholder="Ex. Découvrir la collection">
-                <p class="field-help">Correspondance complète, sans clic si le lien est absent ou ambigu. Aucun mot de passe ni code n’est saisi par le bot.</p>
+                <label for="target-label">Libellé exact du lien ou du bouton <span class="optional">(facultatif)</span></label>
+                <input id="target-label" type="text" maxlength="100" placeholder="Vide = cliquer l’élément principal">
+                <p class="field-help">Renseigné, le bot clique le lien <em>ou</em> le bouton dont le texte correspond exactement; sans aucun clic si le libellé est absent ou ambigu. Vide, il clique l’élément cliquable principal. Aucun mot de passe ni code n’est saisi.</p>
+              </div>
+              <div class="field">
+                <label for="target-mode">Mode</label>
+                <select id="target-mode">
+                  <option value="interval">Intervalle — réparti sur des jours</option>
+                  <option value="goal">Objectif — série continue</option>
+                </select>
               </div>
               <div class="field">
                 <label for="target-count">Nombre visé</label>
-                <input id="target-count" type="number" min="1" max="50" step="1" value="10" required>
+                <input id="target-count" type="number" min="1" step="1" value="300" inputmode="numeric" required>
               </div>
-              <div class="field">
-                <label for="target-duration">Durée (semaines)</label>
-                <input id="target-duration" type="number" min="1" max="52" step="1" value="2" required>
+              <div class="field" id="duration-field">
+                <label for="target-duration">Durée (jours)</label>
+                <input id="target-duration" type="number" min="1" max="365" step="1" value="7" inputmode="numeric" required>
               </div>
+              <p id="plan-preview" class="field-help full-field">Le bot fait au moins 100 clics par jour : un total trop faible est relevé automatiquement.</p>
             </div>
             <div class="form-actions">
               <button id="save-target" class="button button-primary" type="submit">Enregistrer la cible</button>
@@ -109,7 +121,7 @@
               <label class="check-row"><input id="confirm-clicks" type="checkbox" checked><span><strong>Confirmer les clics</strong><small>Chaque visite attend votre approbation avant de cliquer.</small></span></label>
               <button id="start-run" class="button button-primary" type="button" disabled>Lancer les cibles sélectionnées</button>
             </div>
-            <p class="field-help">Calendrier par cible : premier cycle dès le lancement; total tiré entre max(1, N−10) et N+10; cycles suivants répartis sur la durée, avec au moins 5 minutes entre deux exécutions. Maximum : 300 visites potentielles.</p>
+            <p class="field-help">Premier cycle environ une minute après le lancement. En mode intervalle : au moins 100 clics par jour sur la durée choisie, 288 clics par jour au maximum par cible (5 minutes d’écart), les clics manqués sont rattrapés le lendemain. En mode objectif : la série s’enchaîne sans durée.</p>
           </div>
         </section>
 
@@ -118,7 +130,7 @@
             <div><p class="eyebrow">Réseau</p><h2 id="proxy-title">Webshare (facultatif)</h2></div>
             <span id="proxy-badge" class="status-badge status-neutral">Non configuré</span>
           </div>
-          <p class="proxy-copy">Les paramètres proxy sont appliqués à toute la visite du navigateur distant (URL, ressources, clic et redirection), jamais au téléphone. Webshare utilise votre configuration de rotation; les secrets sont chiffrés au repos dans Supabase Vault.</p>
+          <p class="proxy-copy">Le proxy s’applique à toute la visite du navigateur distant (URL, ressources, clic et redirection), jamais au téléphone. Webshare gère la rotation de son côté; vos identifiants sont chiffrés (AES-256-GCM) sur le VPS et ne sont jamais renvoyés au navigateur.</p>
           <form id="proxy-form" class="form-grid">
             <div class="field">
               <label for="proxy-scheme">Type</label>
@@ -148,18 +160,27 @@
           <p id="proxy-message" class="form-message" aria-live="polite"></p>
         </section>
 
+        <section class="card section-card" aria-labelledby="journal-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Journal quotidien</p><h2 id="journal-title">Clics du jour</h2></div>
+            <span id="today-total" class="status-badge status-neutral">0 clic</span>
+          </div>
+          <div id="journal-list" class="journal-list"><div class="empty-state">Aucun clic enregistré aujourd’hui.</div></div>
+          <p class="field-help">Chaque clic réussi est compté par cible et par jour (fuseau du serveur). C’est ce journal qui garantit le minimum de 100 clics par jour et le rattrapage des journées manquées.</p>
+        </section>
+
         <section class="card section-card" aria-labelledby="activity-title">
           <div class="section-heading">
-            <div><p class="eyebrow">Suivi cloud</p><h2 id="activity-title">Activité récente</h2></div>
+            <div><p class="eyebrow">Suivi</p><h2 id="activity-title">Activité récente</h2></div>
             <button id="refresh-activity" class="button button-quiet button-small" type="button">Actualiser</button>
           </div>
           <div id="run-list" class="run-list"></div>
           <div id="activity-list" class="activity-list"><div class="empty-state">Aucun cycle lancé.</div></div>
-          <p class="field-help cloud-note">Les cycles planifiés s’exécutent côté serveur même lorsque l’app est fermée. Le délai dépend du plan et du planificateur cloud; une exécution peut être en attente entre deux passages du worker.</p>
+          <p class="field-help cloud-note">Les cycles planifiés s’exécutent sur votre VPS même lorsque l’app ou le téléphone est fermé. Cette page se rafraîchit toutes les 15 secondes.</p>
         </section>
       </section>
     </main>
-    <footer><span>InstaVA mobile</span><span>Cycles fixes · pas de workflow à construire</span></footer>
+    <footer><span>InstaVA · bot sur VPS</span><span>Au moins 100 clics par jour · 288 maximum</span></footer>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script type="module" src="/app.js"></script>

@@ -9,3 +9,14 @@ venv/
 !.env.example
 .vercel/
 *.tgz
+
+# Données du bot (SQLite, clé de chiffrement) — jamais dans Git
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+secret.key
+*.secret.key
+
+# Déploiement
+backups/

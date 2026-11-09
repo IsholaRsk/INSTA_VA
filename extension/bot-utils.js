@@ -343,53 +343,81 @@
     var span = Math.max(MIN_INTERVAL_DAYS, Math.floor(Number(days) || MIN_INTERVAL_DAYS));
     var total = Math.max(1, Math.floor(Number(count) || 0));
     var quota = dailyVisitQuota(total, span);
-    var totalQuota = quota.reduce(function (sum, value) { return sum + value; }, 0);
-    if (totalQuota !== total) {
-      // Nombre de visites inférieur au minimum quotidien : tout le lot le premier jour.
+    if (quota.reduce(function (sum, value) { return sum + value; }, 0) !== total) {
+      // Nombre inférieur au minimum quotidien : tout le lot tient le premier jour.
       quota = quota.map(function (value, index) { return index === 0 ? total : 0; });
     }
 
     var cap = maxVisitsPerDay(minimumGapMs);
     var times = [];
-    for (var day = 0; day < span && times.length < total; day += 1) {
-      var perDay = Math.min(quota[day], cap);
-      if (!perDay) continue;
-      var dayStart = startAt + day * DAY_MS;
-      var dayEnd = dayStart + DAY_MS;
-      // Fenêtre laissée libre : le reste du temps est réparti aléatoirement.
-      var usable = DAY_MS - perDay * minimumGapMs;
+
+    // Réserve d'un jour : place `wanted` visites entre `from` et `until`,
+    // jamais à moins de `minimumGapMs` l'une de l'autre. Renvoie les horaires
+    // placés et le nombre de visites qui n'ont pas pu l'être.
+    function fillDay(from, until, wanted) {
+      var windowMs = until - from;
+      var fit = Math.min(wanted, Math.max(0, Math.floor((windowMs - 1000) / minimumGapMs) + 1));
+      if (fit <= 0) return { slots: [], carried: wanted };
+      var intervals = Math.max(0, fit - 1);
+      // Espace cumulé disponible *entre* les visites (marge de 1 s en fin de jour).
+      var usable = Math.max(0, windowMs - 1000 - intervals * minimumGapMs);
       var weights = [];
       var weightSum = 0;
-      for (var index = 0; index < perDay; index += 1) {
+      for (var index = 0; index < intervals; index += 1) {
         var value = -Math.log(Math.max(Number(random()), Number.MIN_VALUE));
         if (!Number.isFinite(value) || value <= 0) value = 1;
         weights.push(value);
         weightSum += value;
       }
-      var cursor = dayStart;
-      var allocated = 0;
-      for (var slot = 0; slot < perDay && times.length < total; slot += 1) {
-        var extra = slot === perDay - 1 ? usable - allocated : (usable * weights[slot]) / weightSum;
-        extra = Math.max(0, Math.min(extra, Math.max(0, usable - allocated)));
-        allocated += extra;
-        cursor += extra;
-        times.push(Math.max(dayStart, Math.min(dayEnd - 1000, Math.round(cursor))));
-        cursor += minimumGapMs;
+      var slots = [];
+      var cursor = from;
+      var used = 0;
+      var latest = until - 1000;
+      for (var slot = 0; slot < fit; slot += 1) {
+        if (slot > 0) {
+          var remaining = Math.max(0, usable - used);
+          var extra = remaining ? Math.min(remaining, usable * weights[slot - 1] / weightSum) : 0;
+          used += extra;
+          cursor += minimumGapMs + extra;
+        }
+        var at = Math.round(cursor);
+        if (at > latest) break;
+        if (slots.length && at - slots[slots.length - 1] < minimumGapMs) {
+          at = slots[slots.length - 1] + minimumGapMs;
+          if (at > latest) break;
+        }
+        slots.push(at);
+      }
+      return { slots: slots, carried: wanted - slots.length };
+    }
+
+    for (var day = 0; day < span && times.length < total; day += 1) {
+      var perDay = Math.min(quota[day], cap);
+      if (!perDay) continue;
+      var dayStart = day === 0 ? startAt : startAt + day * DAY_MS;
+      var dayEnd = dayStart + DAY_MS;
+      // L'écart minimal s'applique aussi entre le dernier clic de la veille et
+      // le premier du jour : la fenêtre ne commence jamais trop tôt.
+      if (times.length) dayStart = Math.max(dayStart, times[times.length - 1] + minimumGapMs);
+      var placed = fillDay(dayStart, dayEnd, perDay);
+      times = times.concat(placed.slots);
+      if (placed.carried > 0) {
+        if (day + 1 < span) quota[day + 1] = Math.min(cap, quota[day + 1] + placed.carried);
+        else {
+          // Dernier jour déjà entamé : le reliquat suit, à la cadence minimale.
+          var tail = dayEnd;
+          for (var extra = 0; extra < placed.carried && times.length < total; extra += 1) {
+            times.push(tail + extra * minimumGapMs);
+          }
+        }
       }
     }
-    // Demande supérieure au débit : on continue les jours suivants, à raison d'un
-    // jour plein de clics (le rythme de 100 clics/jour est alors dépassé, pas réduit).
-    var overflowDay = span;
+
+    // Sécurité : ne jamais rendre moins d'horaires que demandé.
+    var last = times.length ? times[times.length - 1] : startAt;
     while (times.length < total) {
-      var extraStart = startAt + overflowDay * DAY_MS;
-      for (var slotOver = 0; slotOver < cap && times.length < total; slotOver += 1) {
-        times.push(extraStart + Math.round(slotOver * minimumGapMs));
-      }
-      overflowDay += 1;
-    }
-    while (times.length < total) {
-      // Sécurité : ne jamais rendre moins d'horaires que demandé.
-      times.push(times.length ? times[times.length - 1] + minimumGapMs : startAt);
+      last += minimumGapMs;
+      times.push(last);
     }
     return times.sort(function (a, b) { return a - b; });
   }
@@ -609,6 +637,9 @@
     parseTargetVisits: parseTargetVisits,
     parseTargetDays: parseTargetDays,
     dailyMinimumVisits: dailyMinimumVisits,
+    MIN_VISITS_PER_DAY: MIN_VISITS_PER_DAY,
+    MIN_INTERVAL_DAYS: MIN_INTERVAL_DAYS,
+    MAX_INTERVAL_DAYS: MAX_INTERVAL_DAYS,
     maxVisitsPerDay: maxVisitsPerDay,
     fitVisitsToRate: fitVisitsToRate,
     dayKey: dayKey,
