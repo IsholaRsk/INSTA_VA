@@ -5,11 +5,16 @@
 (function (global) {
   "use strict";
 
-  var MAX_SAVED_PROXIES = 100;
-  // Le nombre visé n'est plus plafonné : seule une borne de sécurité très haute est gardée
-  // pour éviter les saisies absurdes (Number.MAX_SAFE_INTEGER, « 1e30 »…).
+  // Aucun plafond métier sur le nombre de proxys (seule la mémoire de Chrome limite).
+  // Le nombre visé n'est pas plafonné non plus : une borne très haute évite seulement
+  // les saisies absurdes (Number.MAX_SAFE_INTEGER, « 1e30 »…).
   var MAX_TARGET_VISITS = 1000000;
   var TARGET_MODES = ["interval", "goal"];
+  var MIN_VISITS_PER_DAY = 100;
+  var DAY_MS = 24 * 60 * 60 * 1000;
+  // Une durée d'intervalle est exprimée en jours (1 à 365).
+  var MIN_INTERVAL_DAYS = 1;
+  var MAX_INTERVAL_DAYS = 365;
   var MAX_CONSECUTIVE_FAILURES = 3;
   var OCR_LANGUAGES = ["fra+eng", "fra", "eng"];
   var DEFAULT_OCR_LANGUAGE = "fra+eng";
@@ -236,36 +241,205 @@
     return number;
   }
 
-  /** Durée en semaines d'une cible en mode intervalle. */
-  function parseTargetWeeks(value) {
-    var raw = String(value == null ? "" : value).trim();
+  /** Durée en jours d'une cible en mode intervalle (1 à 365). */
+  function parseTargetDays(value) {
+    var raw = String(value == null ? "" : value).trim().replace(/[\s\u00a0_]/g, "");
     if (!raw || !/^\d+$/.test(raw)) return null;
     var number = Number(raw);
-    if (!Number.isInteger(number) || number < 1 || number > 52) return null;
+    if (!Number.isInteger(number) || number < MIN_INTERVAL_DAYS || number > MAX_INTERVAL_DAYS) return null;
     return number;
   }
 
   /**
    * Nombre de visites effectivement planifiées pour un mode donné.
-   *  - interval : tirage ±10 autour du nombre visé (comportement historique)
-   *  - goal     : exactement le nombre cible, sans tirage
+   * Aucun tirage : le nombre saisi est exécuté à l'identique.
+   * Le mode intervalle garantit en plus au moins MIN_VISITS_PER_DAY visites par jour
+   * sur la durée choisie (sinon le nombre de visites est relevé automatiquement).
    */
   function executionBounds(mode, targetCount) {
     var count = Number(targetCount) || 0;
-    if (normalizeTargetMode(mode) === "goal") {
-      return { min: count, max: count, exact: true };
-    }
-    return { min: Math.max(1, count - 10), max: count + 10, exact: false };
+    return { min: count, max: count, exact: true };
   }
 
-  function planVisits(mode, targetCount, random) {
-    var bounds = executionBounds(mode, targetCount);
-    if (bounds.exact) return Math.max(1, Math.floor(bounds.min));
-    var source = typeof random === "function" ? random : Math.random;
-    var value = Number(source());
-    if (!Number.isFinite(value) || value < 0) value = 0;
-    if (value >= 1) value = 0.9999999999999999;
-    return bounds.min + Math.floor(value * (bounds.max - bounds.min + 1));
+  /** Nombre de visites minimum pour tenir au moins 100 clics par jour sur `days` jours. */
+  function dailyMinimumVisits(days) {
+    var span = Number(days);
+    if (!Number.isFinite(span) || span < MIN_INTERVAL_DAYS) return MIN_VISITS_PER_DAY;
+    // Le premier jour compte comme un jour plein : 1 jour => 100 visites.
+    return MIN_VISITS_PER_DAY * Math.floor(span);
+  }
+
+  /**
+   * Débit maximal d'une journée avec l'écart minimal entre deux visites.
+   * 5 minutes d'écart => 288 clics maximum par jour.
+   */
+  function maxVisitsPerDay(minimumGapMs) {
+    var gap = Number(minimumGapMs) > 0 ? Number(minimumGapMs) : 5 * 60 * 1000;
+    return Math.max(1, Math.floor(DAY_MS / gap));
+  }
+
+  /**
+   * Ajuste une sélection au rythme réellement tenable :
+   *  - au moins 100 clics par jour sur la durée choisie;
+   *  - au plus le débit maximal d'une journée (288 avec 5 minutes d'écart).
+   * Retourne { count, requested, minimum, maximum, adjusted }.
+   */
+  function fitVisitsToRate(requested, days, minimumGapMs) {
+    var wanted = Math.max(1, Math.floor(Number(requested) || 0));
+    var span = Math.max(MIN_INTERVAL_DAYS, Math.floor(Number(days) || MIN_INTERVAL_DAYS));
+    var minimum = Math.min(dailyMinimumVisits(span), maxVisitsPerDay(minimumGapMs) * span);
+    var maximum = maxVisitsPerDay(minimumGapMs) * span;
+    var count = Math.min(Math.max(wanted, minimum), maximum);
+    return {
+      count: count,
+      requested: wanted,
+      minimum: minimum,
+      maximum: maximum,
+      adjusted: count !== wanted,
+    };
+  }
+
+  /**
+   * Nombre de visites réellement exécuté.
+   *  - goal     : exactement le nombre cible
+   *  - interval : le nombre visé, relevé au minimum quotidien de 100 clics/jour
+   */
+  function planVisits(mode, targetCount, options) {
+    var settings = options || {};
+    var count = Math.max(1, Math.floor(Number(targetCount) || 0));
+    if (normalizeTargetMode(mode) === "goal") return count;
+    if (!settings.enforceDaily) return count;
+    return fitVisitsToRate(count, settings.days, settings.minimumGapMs).count;
+  }
+
+  /** Nombre de visites à exécuter chaque jour : au moins 100, réparti sur la durée. */
+  function dailyVisitQuota(count, days) {
+    var visits = Math.max(0, Math.floor(Number(count) || 0));
+    var span = Math.max(MIN_INTERVAL_DAYS, Math.floor(Number(days) || MIN_INTERVAL_DAYS));
+    if (!visits) return [];
+    var base = Math.floor(visits / span);
+    var remainder = visits % span;
+    var quota = [];
+    for (var index = 0; index < span; index += 1) {
+      quota.push(base + (index < remainder ? 1 : 0));
+    }
+    // Le premier jour absorbe les visites supplémentaires si le nombre saisi est
+    // inférieur au minimum quotidien (le lot complet est alors fait d'affilée).
+    if (base === 0) {
+      quota = quota.map(function (value, index) { return index === 0 ? visits : value; });
+    }
+    return quota;
+  }
+
+  /**
+   * Répartit `count` visites sur `days` jours.
+   * Chaque journée reçoit au moins 100 clics; les horaires d'une journée sont tirés
+   * entre le début et la fin de cette journée (au moins 5 minutes d'écart).
+   */
+  function buildDailyRunTimes(count, days, startAt, options) {
+    var settings = options || {};
+    var minimumGapMs = Number(settings.minimumGapMs) > 0 ? Number(settings.minimumGapMs) : 5 * 60 * 1000;
+    var random = typeof settings.random === "function" ? settings.random : Math.random;
+    var span = Math.max(MIN_INTERVAL_DAYS, Math.floor(Number(days) || MIN_INTERVAL_DAYS));
+    var total = Math.max(1, Math.floor(Number(count) || 0));
+    var quota = dailyVisitQuota(total, span);
+    var totalQuota = quota.reduce(function (sum, value) { return sum + value; }, 0);
+    if (totalQuota !== total) {
+      // Nombre de visites inférieur au minimum quotidien : tout le lot le premier jour.
+      quota = quota.map(function (value, index) { return index === 0 ? total : 0; });
+    }
+
+    var cap = maxVisitsPerDay(minimumGapMs);
+    var times = [];
+    for (var day = 0; day < span && times.length < total; day += 1) {
+      var perDay = Math.min(quota[day], cap);
+      if (!perDay) continue;
+      var dayStart = startAt + day * DAY_MS;
+      var dayEnd = dayStart + DAY_MS;
+      // Fenêtre laissée libre : le reste du temps est réparti aléatoirement.
+      var usable = DAY_MS - perDay * minimumGapMs;
+      var weights = [];
+      var weightSum = 0;
+      for (var index = 0; index < perDay; index += 1) {
+        var value = -Math.log(Math.max(Number(random()), Number.MIN_VALUE));
+        if (!Number.isFinite(value) || value <= 0) value = 1;
+        weights.push(value);
+        weightSum += value;
+      }
+      var cursor = dayStart;
+      var allocated = 0;
+      for (var slot = 0; slot < perDay && times.length < total; slot += 1) {
+        var extra = slot === perDay - 1 ? usable - allocated : (usable * weights[slot]) / weightSum;
+        extra = Math.max(0, Math.min(extra, Math.max(0, usable - allocated)));
+        allocated += extra;
+        cursor += extra;
+        times.push(Math.max(dayStart, Math.min(dayEnd - 1000, Math.round(cursor))));
+        cursor += minimumGapMs;
+      }
+    }
+    // Demande supérieure au débit : on continue les jours suivants, à raison d'un
+    // jour plein de clics (le rythme de 100 clics/jour est alors dépassé, pas réduit).
+    var overflowDay = span;
+    while (times.length < total) {
+      var extraStart = startAt + overflowDay * DAY_MS;
+      for (var slotOver = 0; slotOver < cap && times.length < total; slotOver += 1) {
+        times.push(extraStart + Math.round(slotOver * minimumGapMs));
+      }
+      overflowDay += 1;
+    }
+    while (times.length < total) {
+      // Sécurité : ne jamais rendre moins d'horaires que demandé.
+      times.push(times.length ? times[times.length - 1] + minimumGapMs : startAt);
+    }
+    return times.sort(function (a, b) { return a - b; });
+  }
+
+  /**
+   * Journal quotidien : nombre de clics déjà effectués chaque jour.
+   * Sert à garantir au moins 100 clics PAR JOUR sur la durée, même si le nombre
+   * total saisi est faible (40 clics étalés sur 3 jours ne suffisent pas).
+   */
+  function dayKey(dateOrTimestamp) {
+    var date = new Date(dateOrTimestamp == null ? Date.now() : dateOrTimestamp);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toISOString().slice(0, 10);
+  }
+
+  function pruneDailyJournal(journal, keepDays, now) {
+    var source = journal && typeof journal === "object" ? journal : {};
+    var limit = Math.max(1, Math.floor(Number(keepDays) || 31));
+    var today = Date.parse(dayKey(now) + "T00:00:00Z");
+    var result = {};
+    Object.keys(source).forEach(function (key) {
+      var parsed = Date.parse(key + "T00:00:00Z");
+      if (!Number.isFinite(parsed)) return;
+      if (today - parsed <= (limit - 1) * DAY_MS) result[key] = Math.max(0, Math.floor(Number(source[key]) || 0));
+    });
+    return result;
+  }
+
+  /**
+   * Objectif de clics à atteindre dans la journée.
+   *  - base : quota quotidien du plan, relevé au minimum de 100 clics/jour;
+   *  - retard : les jours précédents n'ayant pas atteint 100 clics sont rattrapés,
+   *    sans dépasser 100 clics de rattrapage par jour (pour ne pas tout empiler).
+   */
+  function dailyClickTarget(options) {
+    var settings = options || {};
+    var quota = Math.max(0, Math.floor(Number(settings.plannedToday) || 0));
+    var done = Math.max(0, Math.floor(Number(settings.doneToday) || 0));
+    var minimum = Math.max(0, Math.floor(Number(settings.minimumToday) || 0));
+    var backlog = Math.max(0, Math.floor(Number(settings.backlog) || 0));
+    var base = Math.max(quota, minimum);
+    if (done < base) return base + Math.min(backlog, minimum);
+    return base + Math.min(backlog, minimum);
+  }
+
+  /** Reste-t-il des clics à faire aujourd'hui (quota, minimum et rattrapage) ? */
+  function needsMoreToday(options) {
+    var settings = options || {};
+    var done = Math.max(0, Math.floor(Number(settings.doneToday) || 0));
+    return done < dailyClickTarget(settings);
   }
 
   /** Pause entre deux visites enchaînées dans un même lot (mode objectif). */
@@ -315,7 +489,7 @@
     if (mode === "goal") {
       return `${visits} visite(s) d’affilée, sans durée : ${click} puis passer à la suivante.`;
     }
-    return `visée ${visits} (tirage ${Math.max(1, visits - 10)}–${visits + 10}) sur ${Number(target && target.durationWeeks) || 0} semaine(s) : ${click}.`;
+    return `visée ${visits} sur ${Number(target && target.durationDays) || 0} jour(s) : ${click}.`;
   }
 
   function toCount(value) {
@@ -425,13 +599,24 @@
   }
 
   var api = {
-    MAX_SAVED_PROXIES: MAX_SAVED_PROXIES,
     MAX_CONSECUTIVE_FAILURES: MAX_CONSECUTIVE_FAILURES,
     MAX_TARGET_VISITS: MAX_TARGET_VISITS,
     TARGET_MODES: TARGET_MODES.slice(),
+    MIN_VISITS_PER_DAY: MIN_VISITS_PER_DAY,
+    DAY_MS: DAY_MS,
+    MAX_INTERVAL_DAYS: MAX_INTERVAL_DAYS,
     normalizeTargetMode: normalizeTargetMode,
     parseTargetVisits: parseTargetVisits,
-    parseTargetWeeks: parseTargetWeeks,
+    parseTargetDays: parseTargetDays,
+    dailyMinimumVisits: dailyMinimumVisits,
+    maxVisitsPerDay: maxVisitsPerDay,
+    fitVisitsToRate: fitVisitsToRate,
+    dayKey: dayKey,
+    pruneDailyJournal: pruneDailyJournal,
+    needsMoreToday: needsMoreToday,
+    dailyClickTarget: dailyClickTarget,
+    dailyVisitQuota: dailyVisitQuota,
+    buildDailyRunTimes: buildDailyRunTimes,
     executionBounds: executionBounds,
     planVisits: planVisits,
     nextVisitDelayMs: nextVisitDelayMs,

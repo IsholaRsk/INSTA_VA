@@ -3,13 +3,15 @@ const PROXY_STORAGE_KEY = "savedProxies";
 const PROXY_SETTINGS_KEY = "proxySettings";
 const PROXY_MIGRATION_FLAG = "proxiesMigrated";
 const MAX_SAVED_TARGETS = 50;
-const MAX_TARGET_DURATION_WEEKS = 52;
-const DEFAULT_TARGET_WEEKS = 2;
+const MAX_TARGET_DURATION_DAYS = 365;
+const DEFAULT_TARGET_DAYS = 7;
 const DEFAULT_VISIT_INTERVAL_MS = 2500;
+const DAILY_JOURNAL_KEY = "dailyClicks";
+const DAILY_JOURNAL_KEEP_DAYS = 40;
 const PROXY_RECOVERY_KEY = "temporaryProxyRecovery";
 const PROXY_AUTH_SESSION_KEY = "temporaryProxyAuth";
 const MIN_SCHEDULE_INTERVAL_MS = 5 * 60 * 1000;
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 const VIEWPORT = { width: 1280, height: 800 };
 const REDIRECT_QUIET_MS = 2500;
 const REDIRECT_MAX_WAIT_MS = 15000;
@@ -19,13 +21,23 @@ const OCR_ASSET_BASE = "vendor/";
 const Utils = globalThis.InstaVAUtils;
 if (!Utils) throw new Error("Le module bot-utils.js n’a pas été chargé.");
 const {
-  MAX_SAVED_PROXIES,
   MAX_CONSECUTIVE_FAILURES,
   MAX_TARGET_VISITS,
+  MIN_VISITS_PER_DAY,
+  MAX_INTERVAL_DAYS,
   normalizeTargetMode,
   parseTargetVisits,
-  parseTargetWeeks,
+  parseTargetDays,
   executionBounds,
+  dailyMinimumVisits,
+  dailyVisitQuota,
+  buildDailyRunTimes,
+  fitVisitsToRate,
+  maxVisitsPerDay,
+  dayKey,
+  pruneDailyJournal,
+  dailyClickTarget,
+  needsMoreToday,
   planVisits,
   nextVisitDelayMs,
   normalizeLinkLabel: normalizeLinkLabelText,
@@ -151,7 +163,7 @@ cancelEditButton.addEventListener("click", clearTargetForm);
 selectAllTargetsButton.addEventListener("click", selectAllTargets);
 clearSelectionButton.addEventListener("click", clearTargetSelection);
 applyCountToAllButton.addEventListener("click", () => applyCommonValue("executionTarget"));
-applyDurationToAllButton.addEventListener("click", () => applyCommonValue("durationWeeks"));
+applyDurationToAllButton.addEventListener("click", () => applyCommonValue("durationDays"));
 startButton.addEventListener("click", startRun);
 stopButton.addEventListener("click", () => {
   stopRequested = true;
@@ -203,12 +215,17 @@ function sanitizeSavedTarget(raw) {
     const linkLabel = normalizeLinkLabelText(rawLinkLabel);
     const executionTarget = parseTargetVisits(raw.executionTarget);
     const mode = normalizeTargetMode(raw.mode);
-    const durationWeeks = parseTargetWeeks(raw.durationWeeks ?? (raw.durationDays != null ? Math.ceil(Number(raw.durationDays) / 7) : NaN));
+    // La durée est exprimée en jours. Les anciennes fiches en semaines (<= 0.9.0)
+    // sont converties : 1 semaine = 7 jours.
+    const legacyDays = raw.durationWeeks != null
+      ? Number(raw.durationWeeks) * 7
+      : Number(raw.durationDays);
+    const durationDays = parseTargetDays(legacyDays);
     if (!pseudo || pseudo.length > 60) return null;
     if (executionTarget === null) return null;
     if (!linkLabel.ok) return null;
     // La durée n'est conservée qu'en mode intervalle; en mode objectif elle est ignorée.
-    if (mode === "interval" && durationWeeks === null) return null;
+    if (mode === "interval" && durationDays === null) return null;
     return {
       id: raw.id,
       pseudo,
@@ -216,7 +233,7 @@ function sanitizeSavedTarget(raw) {
       linkLabel: linkLabel.label,
       mode,
       executionTarget,
-      durationWeeks: mode === "interval" ? durationWeeks : DEFAULT_TARGET_WEEKS,
+      durationDays: mode === "interval" ? durationDays : DEFAULT_TARGET_DAYS,
     };
   } catch {
     return null;
@@ -263,7 +280,7 @@ function renderTargetList() {
     const linkText = target.linkLabel ? `« ${target.linkLabel} »` : "lien principal (libellé vide)";
     const planText = target.mode === "goal"
       ? `${target.executionTarget} visite(s) d’affilée, sans durée`
-      : `visée ${target.executionTarget}, tirage ${bounds.min}–${bounds.max} · Durée : ${target.durationWeeks} semaine(s)`;
+      : `visée ${target.executionTarget} · Durée : ${target.durationDays} jour(s) · ≥ ${MIN_VISITS_PER_DAY} clics/jour`;
     meta.textContent = `${target.url}\nLien à cliquer : ${linkText}\nMode ${modeLabel} : ${planText}`;
     content.append(topLine, meta);
     item.append(checkbox, content);
@@ -350,11 +367,11 @@ function readTargetForm() {
   if (executionTarget === null) {
     throw new Error(`Nombre ${mode === "goal" ? "cible" : "visé"} invalide : saisis un entier positif (maximum ${MAX_TARGET_VISITS.toLocaleString("fr")}).`);
   }
-  const durationWeeks = mode === "goal" ? DEFAULT_TARGET_WEEKS : parseTargetWeeks(targetDurationWeeksInput.value);
-  if (mode === "interval" && durationWeeks === null) {
-    throw new Error(`Durée en semaines invalide : saisis un entier entre 1 et ${MAX_TARGET_DURATION_WEEKS}.`);
+  const durationDays = mode === "goal" ? DEFAULT_TARGET_DAYS : parseTargetDays(targetDurationWeeksInput.value);
+  if (mode === "interval" && durationDays === null) {
+    throw new Error(`Durée en jours invalide : saisis un entier entre 1 et ${MAX_TARGET_DURATION_DAYS}.`);
   }
-  return { pseudo, url, linkLabel: linkLabel.label, mode, executionTarget, durationWeeks };
+  return { pseudo, url, linkLabel: linkLabel.label, mode, executionTarget, durationDays };
 }
 
 function selectedTargetMode() {
@@ -379,7 +396,7 @@ function applyTargetModeToForm() {
   targetExecutionCountInput.placeholder = isGoal ? "Ex. 500" : "Ex. 10";
   targetModeHint.textContent = isGoal
     ? "Le bot enchaîne exactement ce nombre de visites en une seule fois, sans durée ni étalement. Avec un libellé, il clique ce lien à chaque visite; sans libellé, il clique le lien principal de la page."
-    : "Le total réel est tiré parmi les entiers de max(1, N−10) à N+10. La première visite commence au lancement; les suivantes sont réparties aléatoirement sur la durée propre à cette cible (1 à 52 semaines, 5 minutes minimum entre deux visites).";
+    : `Le nombre saisi est exécuté à l'identique, réparti sur la durée en jours choisie (1 à ${MAX_TARGET_DURATION_DAYS}), avec au moins ${MIN_VISITS_PER_DAY} clics par jour et 5 minutes minimum entre deux visites. Un nombre trop faible est relevé au minimum quotidien.`;
 }
 
 function readProxyForm() {
@@ -407,7 +424,7 @@ async function initializeProxies() {
   try {
     const stored = await chrome.storage.local.get([PROXY_STORAGE_KEY, PROXY_SETTINGS_KEY, PROXY_MIGRATION_FLAG]);
     savedProxies = Array.isArray(stored?.[PROXY_STORAGE_KEY])
-      ? stored[PROXY_STORAGE_KEY].map(sanitizeSavedProxy).filter(Boolean).slice(0, MAX_SAVED_PROXIES)
+      ? stored[PROXY_STORAGE_KEY].map(sanitizeSavedProxy).filter(Boolean)
       : [];
     proxySettings = sanitizeProxySettings(stored?.[PROXY_SETTINGS_KEY]);
     // Récupère le tout premier proxy saisi dans l'ancien formulaire unique (v0.7.0).
@@ -602,11 +619,6 @@ async function saveProxyFromForm(event) {
   }
 
   const isEditing = Boolean(editingProxyId);
-  if (!isEditing && savedProxies.length >= MAX_SAVED_PROXIES) {
-    setStatus(`Maximum ${MAX_SAVED_PROXIES} proxys enregistrés.`);
-    return;
-  }
-
   const nextProxies = isEditing
     ? savedProxies.map((proxy) => proxy.id === editingProxyId
       ? { ...proxy, ...value, enabled: true, disabledReason: "", consecutiveFailures: 0, lastError: "" }
@@ -652,7 +664,6 @@ async function importProxiesFromText(event) {
       duplicates += 1;
       continue;
     }
-    if (savedProxies.length + additions.length >= MAX_SAVED_PROXIES) break;
     known.add(signature);
     additions.push(createProxyRecord(entry));
   }
@@ -673,7 +684,6 @@ async function importProxiesFromText(event) {
   const parts = [`${additions.length} proxy(s) importé(s)`];
   if (duplicates) parts.push(`${duplicates} doublon(s) ignoré(s)`);
   if (errors.length) parts.push(`${errors.length} ligne(s) invalide(s)`);
-  if (savedProxies.length >= MAX_SAVED_PROXIES) parts.push(`limite de ${MAX_SAVED_PROXIES} atteinte`);
   setStatus(`${parts.join(" · ")}.`);
   if (errors.length) addLog("Lignes ignorées", errors.map((error) => `Ligne ${error.line} : ${error.message}`).join("\n"), true);
   proxyDefaultPasswordInput.value = "";
@@ -867,7 +877,7 @@ function editTarget(id) {
   targetUrlInput.value = target.url;
   targetLinkLabelInput.value = target.linkLabel;
   targetExecutionCountInput.value = String(target.executionTarget);
-  targetDurationWeeksInput.value = String(target.durationWeeks);
+  targetDurationWeeksInput.value = String(target.durationDays);
   setTargetMode(target.mode);
   formTitle.textContent = "Modifier une cible";
   saveTargetButton.textContent = "Enregistrer les modifications";
@@ -915,8 +925,8 @@ async function applyCommonValue(field) {
       value = parseTargetVisits(commonExecutionCountInput.value);
       if (value === null) throw new Error(`Nombre cible commun invalide : entier positif attendu (maximum ${MAX_TARGET_VISITS.toLocaleString("fr")}).`);
     } else {
-      value = parseTargetWeeks(commonDurationWeeksInput.value);
-      if (value === null) throw new Error(`Durée commune invalide : entier entre 1 et ${MAX_TARGET_DURATION_WEEKS} attendu.`);
+      value = parseTargetDays(commonDurationWeeksInput.value);
+      if (value === null) throw new Error(`Durée commune invalide : entier entre 1 et ${MAX_TARGET_DURATION_DAYS} attendu.`);
     }
     const nextTargets = savedTargets.map((target) => ({ ...target, [field]: value }));
     await persistTargets(nextTargets);
@@ -958,10 +968,15 @@ async function startRun() {
       if (parseTargetVisits(target.executionTarget) === null) {
         throw new Error(`Nombre de visites invalide pour « ${target.pseudo} » (entier positif, maximum ${MAX_TARGET_VISITS.toLocaleString("fr")}).`);
       }
-      if (target.mode === "interval" && parseTargetWeeks(target.durationWeeks) === null) {
-        throw new Error(`Durée invalide pour « ${target.pseudo} » (1 à ${MAX_TARGET_DURATION_WEEKS} semaines).`);
+      if (target.mode === "interval" && parseTargetDays(target.durationDays) === null) {
+        throw new Error(`Durée invalide pour « ${target.pseudo} » (1 à ${MAX_TARGET_DURATION_DAYS} jours).`);
       }
-      expectedVisits += target.executionTarget;
+      if (target.mode === "goal") {
+        expectedVisits += target.executionTarget;
+      } else {
+        // Le mode intervalle tient au moins 100 clics/jour sur la durée choisie.
+        expectedVisits += fitVisitsToRate(target.executionTarget, target.durationDays, MIN_SCHEDULE_INTERVAL_MS).count;
+      }
     }
     // Aucun plafond de visites : on informe simplement pour les grosses sélections.
     if (expectedVisits > 500) {
@@ -1006,6 +1021,7 @@ async function startRun() {
   let totalFailures = 0;
   let completedRuns = 0;
   let totalRuns = 0;
+  const dailyJournal = await loadDailyJournal();
   try {
     if (proxyPool) {
       const proxyControl = await chrome.proxy.settings.get({ incognito: false });
@@ -1039,6 +1055,30 @@ async function startRun() {
       const runNumber = plan.nextIndex + 1;
       if (dueAt > Date.now()) await waitUntil(dueAt, plan.target.pseudo, runNumber, plan.count);
       if (stopRequested) break;
+
+      // Journal quotidien : garantit au moins 100 clics par jour sur la durée.
+      if (!plan.batch) {
+        const targetForToday = rollPlanToToday(plan, dailyJournal);
+        if (!needsMoreToday({
+          doneToday: plan.doneToday,
+          plannedToday: plan.plannedToday,
+          minimumToday: plan.minimumToday,
+          backlog: plan.backlog,
+        })) {
+          // Objectif du jour atteint : on attend le lendemain pour la suite du plan.
+          const tomorrow = Date.parse(dayKey(Date.now()) + "T00:00:00Z") + DAY_MS;
+          await waitUntil(tomorrow + MIN_SCHEDULE_INTERVAL_MS, plan.target.pseudo, runNumber, plan.count);
+          if (stopRequested) break;
+          continue;
+        }
+        // Recalage de l'horaire si le retard impose des clics supplémentaires.
+        if (plan.doneToday >= plan.plannedToday && plan.nextIndex < plan.count) {
+          const topUpAt = plan.lastRunFinishedAt ? plan.lastRunFinishedAt + MIN_SCHEDULE_INTERVAL_MS : Date.now();
+          if (topUpAt > Date.now()) await waitUntil(topUpAt, plan.target.pseudo, runNumber, plan.count);
+          if (stopRequested) break;
+        }
+        void targetForToday;
+      }
 
       let proxy = null;
       if (proxyPool) {
@@ -1092,6 +1132,13 @@ async function startRun() {
       }
       if (proxy) await recordProxyOutcome(proxy, outcome, proxyPool);
       if (stopRequested) break;
+      if (!plan.batch) {
+        // Un cycle exécuté compte comme un clic du jour, même sans clic effectif.
+        const today = dayKey(Date.now());
+        dailyJournal[today] = (dailyJournal[today] || 0) + 1;
+        plan.doneToday = dailyJournal[today];
+        await saveDailyJournal(dailyJournal);
+      }
       plan.lastRunFinishedAt = Date.now();
       // Mode objectif : les visites s'enchaînent avec une pause courte et variable.
       if (plan.batch) plan.nextDelayMs = nextVisitDelayMs(DEFAULT_VISIT_INTERVAL_MS, randomUnit);
@@ -1171,49 +1218,66 @@ async function recordProxyOutcome(proxy, outcome, proxyPool) {
  */
 function createTargetPlan(target, startAt, order) {
   const mode = normalizeTargetMode(target.mode);
-  const count = planVisits(mode, target.executionTarget, randomUnit);
   const batch = mode === "goal";
+  if (batch) {
+    const count = planVisits("goal", target.executionTarget);
+    return {
+      target: { ...target, mode },
+      count,
+      batch,
+      batchApproval: null,
+      runTimes: Array.from({ length: count }, () => startAt),
+      nextIndex: 0,
+      lastRunFinishedAt: 0,
+      order,
+    };
+  }
+
+  const days = parseTargetDays(target.durationDays) || DEFAULT_TARGET_DAYS;
+  const fitted = fitVisitsToRate(target.executionTarget, days, MIN_SCHEDULE_INTERVAL_MS);
   return {
     target: { ...target, mode },
-    count,
-    batch,
+    count: fitted.count,
+    requested: fitted.requested,
+    adjusted: fitted.adjusted,
+    minimum: fitted.minimum,
+    maximum: fitted.maximum,
+    batch: false,
     batchApproval: null,
-    runTimes: batch
-      ? Array.from({ length: count }, () => startAt)
-      : buildRandomRunTimes(count, target.durationWeeks, startAt),
+    runTimes: buildDailyRunTimes(fitted.count, days, startAt, {
+      minimumGapMs: MIN_SCHEDULE_INTERVAL_MS,
+      random: randomUnit,
+    }),
+    days,
+    // Rythme minimum garanti : au moins 100 clics par jour sur la durée.
+    plannedToday: Math.max(fitted.count / days, MIN_VISITS_PER_DAY),
+    minimumToday: MIN_VISITS_PER_DAY,
+    dayQuota: dailyVisitQuota(fitted.count, days),
+    quotaEnd: dailyVisitQuota(fitted.count, days)[0] || 0,
+    dayIndex: 0,
+    todayKey: dayKey(startAt),
+    doneToday: 0,
+    backlog: 0,
+    journal: {},
     nextIndex: 0,
     lastRunFinishedAt: 0,
     order,
   };
 }
 
-function buildRandomRunTimes(count, durationWeeks, startAt) {
-  const runTimes = [startAt];
-  if (count <= 1) return runTimes;
-  const durationMs = durationWeeks * WEEK_MS;
-  const gapCount = count;
-  const extraMs = durationMs - gapCount * MIN_SCHEDULE_INTERVAL_MS;
-  if (extraMs < 0) throw new Error("La durée choisie est trop courte pour les intervalles minimaux.");
-  const weights = Array.from({ length: gapCount }, () => -Math.log(randomUnit()));
-  const weightTotal = weights.reduce((sum, weight) => sum + weight, 0);
-  let elapsed = 0;
-  let allocatedExtra = 0;
-  for (let index = 0; index < gapCount; index += 1) {
-    const extra = index === gapCount - 1
-      ? extraMs - allocatedExtra
-      : extraMs * weights[index] / weightTotal;
-    allocatedExtra += extra;
-    elapsed += MIN_SCHEDULE_INTERVAL_MS + extra;
-    if (index < count - 1) runTimes.push(startAt + Math.round(elapsed));
-  }
-  return runTimes;
-}
-
 function getNextDueAt(plan) {
-  const plannedTime = plan.runTimes[plan.nextIndex];
-  if (plan.nextIndex === 0) return plannedTime;
-  if (plan.batch) return plan.lastRunFinishedAt + plan.nextDelayMs;
-  return Math.max(plannedTime, plan.lastRunFinishedAt + MIN_SCHEDULE_INTERVAL_MS);
+  if (plan.batch) {
+    if (plan.nextIndex === 0) return plan.runTimes[0];
+    return plan.lastRunFinishedAt + plan.nextDelayMs;
+  }
+  const plannedTime = plan.runTimes[Math.min(plan.nextIndex, plan.runTimes.length - 1)];
+  const earliest = plan.nextIndex === 0 ? plannedTime : plan.lastRunFinishedAt + MIN_SCHEDULE_INTERVAL_MS;
+  // Tant que le quota du jour n'est pas atteint, on reste dans la journée visée.
+  if (plan.nextIndex < plan.quotaEnd) {
+    const milestone = plan.runTimes[plan.quotaEnd];
+    return Math.min(Math.max(plannedTime, earliest), milestone);
+  }
+  return Math.max(plannedTime, earliest);
 }
 
 /**
@@ -1236,6 +1300,62 @@ async function executeTargetRun(target, runIndex, runCount, windowId, proxy, pro
     await shutdownOcrWorker("erreur", `OCR en échec : ${error.message}`);
   }
   return processTarget(target, runIndex, runCount, windowId, proxy, proxyPool, ocrReady, options);
+}
+
+/** Charge le journal de clics (une entrée par jour) depuis le stockage local. */
+async function loadDailyJournal() {
+  try {
+    const stored = await chrome.storage.local.get(DAILY_JOURNAL_KEY);
+    return pruneDailyJournal(stored?.[DAILY_JOURNAL_KEY], DAILY_JOURNAL_KEEP_DAYS);
+  } catch {
+    return {};
+  }
+}
+
+async function saveDailyJournal(journal) {
+  try {
+    await chrome.storage.local.set({ [DAILY_JOURNAL_KEY]: pruneDailyJournal(journal, DAILY_JOURNAL_KEEP_DAYS) });
+  } catch (error) {
+    addLog("Journal quotidien non enregistré", error.message, true);
+  }
+}
+
+/**
+ * Passe le plan à la journée courante : avance les quotas et calcule le retard
+ * (jours précédents sous 100 clics). Retourne l'objectif de clics du jour.
+ */
+function rollPlanToToday(plan, journal, now = Date.now()) {
+  const today = dayKey(now);
+  const todayDone = journal[today] || 0;
+  if (plan.todayKey === today) {
+    plan.doneToday = todayDone;
+    plan.backlog = 0;
+    return dailyClickTarget({ doneToday: todayDone, plannedToday: plan.plannedToday, minimumToday: plan.minimumToday, backlog: 0 });
+  }
+
+  // Nouvelle journée : avance d'autant de jours que nécessaire.
+  let guard = 0;
+  while (plan.todayKey !== today && guard < 400) {
+    plan.todayKey = dayKey(Date.parse(plan.todayKey + "T00:00:00Z") + DAY_MS);
+    plan.dayIndex += 1;
+    plan.doneToday = 0;
+    guard += 1;
+  }
+  // Quota cumulé jusqu'à la journée courante (le plan ne dépasse pas sa durée).
+  const cumulative = plan.dayQuota.slice(0, Math.min(plan.dayIndex + 1, plan.dayQuota.length))
+    .reduce((sum, value) => sum + value, 0);
+  plan.quotaEnd = Math.min(cumulative, plan.count);
+  // Retard : jours écoulés sous le minimum de 100 clics.
+  const elapsed = Math.min(plan.dayIndex + 1, plan.days);
+  const expected = plan.minimumToday * elapsed;
+  plan.backlog = Math.max(0, expected - cumulative);
+  plan.doneToday = todayDone;
+  return dailyClickTarget({
+    doneToday: todayDone,
+    plannedToday: plan.plannedToday,
+    minimumToday: plan.minimumToday,
+    backlog: plan.backlog,
+  });
 }
 
 async function waitUntil(dueAt, pseudo, runNumber, runCount) {
@@ -1378,13 +1498,13 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
 
     let match;
     if (label) {
-      const matches = await findExactLinks(activePageTabId, label);
+      const matches = await findExactClickables(activePageTabId, label);
       if (!matches.length) {
-        addLog(`${target.pseudo} · lien introuvable`, `Aucun lien visible dont le libellé complet correspond à « ${label} ». Aucun clic effectué.`, true);
+        addLog(`${target.pseudo} · libellé introuvable`, `Aucun lien ni bouton visible dont le libellé complet correspond à « ${label} ». Aucun clic effectué.`, true);
         return { status: "skipped", proxyActive };
       }
       if (matches.length > 1) {
-        addLog(`${target.pseudo} · liens identiques`, `${matches.length} liens visibles portent le libellé complet « ${label} ». Aucun clic effectué pour éviter une sélection ambiguë.`, true);
+        addLog(`${target.pseudo} · libellés identiques`, `${matches.length} éléments visibles (liens ou boutons) portent le libellé complet « ${label} ». Aucun clic effectué pour éviter une sélection ambiguë.`, true);
         return { status: "skipped", proxyActive };
       }
       match = matches[0];
@@ -1392,13 +1512,13 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
       // Aucun libellé : on clique sans critère de texte.
       const primary = await findPrimaryLink(activePageTabId);
       if (!primary.picked) {
-        addLog(`${target.pseudo} · aucun lien`, "La page chargée ne contient aucun lien cliquable visible. Aucun clic effectué.", true);
+        addLog(`${target.pseudo} · aucun élément cliquable`, "La page chargée ne contient aucun lien ni bouton visible. Aucun clic effectué.", true);
         return { status: "skipped", proxyActive };
       }
       match = primary.picked;
       addLog(
-        `${target.pseudo} · lien choisi automatiquement`,
-        `${primary.links.length} lien(s) visible(s) → ${primary.picked.reason} : ${primary.picked.text ? `« ${primary.picked.text} »` : "sans texte"}${primary.picked.href ? `\n→ ${primary.picked.href}` : ""}`,
+        `${target.pseudo} · cible choisie automatiquement`,
+        `${primary.links.length} élément(s) cliquable(s) → ${primary.picked.reason} : ${primary.picked.text ? `« ${primary.picked.text} »` : "sans texte"}${primary.picked.href ? `\n→ ${primary.picked.href}` : ""}`,
       );
     }
     const ocrPhrase = findOcrPhrase(ocrResult.words, label);
@@ -1415,13 +1535,14 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
     } else if (ocrResult.words.length) {
       addLog(`${target.pseudo} · OCR sans correspondance`, `Le libellé « ${label} » n’a pas été relu dans la capture; la détection DOM exacte est conservée.`);
     }
+    const kind = match.type || "lien";
     const description = label
-      ? `Cible : ${target.pseudo}\nCliquer une fois sur le lien complet « ${label} »${match.href ? ` (${match.href})` : ""}.`
-      : `Cible : ${target.pseudo}\nCliquer une fois sur le lien choisi automatiquement${match.text ? ` : « ${match.text} »` : ""}${match.href ? ` (${match.href})` : ""}.`;
+      ? `Cible : ${target.pseudo}\nCliquer une fois sur le ${kind} « ${label} »${match.href ? ` (${match.href})` : ""}.`
+      : `Cible : ${target.pseudo}\nCliquer une fois sur le ${kind} choisi automatiquement${match.text ? ` : « ${match.text} »` : ""}${match.href ? ` (${match.href})` : ""}.`;
     const sensitive = isSensitiveLabel(label);
     const needsConfirm = (confirmClicksInput.checked || sensitive) && !options.skipConfirm;
     if (needsConfirm && !(await askConfirmation(description))) {
-      addLog(`${target.pseudo} · clic ignoré`, `Lien « ${label} »`);
+      addLog(`${target.pseudo} · clic ignoré`, `${kind} « ${label || match.text || ""} »`);
       return { status: "skipped", proxyActive };
     }
     if (stopRequested) return { status: "skipped", proxyActive };
@@ -1434,7 +1555,7 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
     await clickAt(activePageTabId, match.x, match.y);
     clicked = true;
     const openedTab = await openedTabPromise;
-    addLog(`${target.pseudo} · lien cliqué`, `« ${label} »${match.href ? ` → ${match.href}` : ""}`);
+    addLog(`${target.pseudo} · ${kind} cliqué`, `« ${label || match.text || ""} »${match.href ? ` → ${match.href}` : ""}`);
     if (openedTab) {
       activeTabId = openedTab.id;
       finalTab = await waitForStableUrl(openedTab.id, false);
@@ -1578,94 +1699,107 @@ function waitForOpenedTab(openerTabId, onOpened, timeoutMs = 900) {
   });
 }
 
-async function findExactLinks(tabId, label) {
+/** Sélecteur commun : liens + boutons/boutons-liens réellement cliquables. */
+const CLICKABLE_SELECTOR = 'a[href], [role="link"], button, input[type="button"], input[type="submit"], [role="button"], summary';
+
+function clickableHelpersSource() {
+  return `
+    const normalize = (value) => String(value || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLocaleLowerCase("fr")
+      .replace(/\s+/g, " ")
+      .trim();
+    const labelOf = (element) => {
+      if (element instanceof HTMLInputElement) return element.value || element.getAttribute("aria-label") || "";
+      const visibleText = String(element.innerText || "").replace(/\s+/g, " ").trim();
+      return visibleText || element.getAttribute("aria-label") || element.getAttribute("title") || "";
+    };
+    const isVisible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      if (!rect.width || !rect.height || rect.bottom <= 0 || rect.right <= 0 ||
+          rect.top >= window.innerHeight || rect.left >= window.innerWidth) return false;
+      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+      if (style.pointerEvents === "none" || element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true") return false;
+      return true;
+    };
+    const kindOf = (element) => {
+      if (element.tagName === "A" || element.getAttribute("role") === "link") return "lien";
+      if (element.tagName === "SUMMARY") return "résumé";
+      return "bouton";
+    };
+    const describe = (element) => {
+      const rect = element.getBoundingClientRect();
+      const left = Math.max(0, rect.left);
+      const right = Math.min(window.innerWidth, rect.right);
+      const top = Math.max(0, rect.top);
+      const bottom = Math.min(window.innerHeight, rect.bottom);
+      const rawHref = element instanceof HTMLAnchorElement ? (element.href || "") : "";
+      return {
+        index: Number(element.dataset.instavaIndex),
+        x: (left + right) / 2,
+        y: (top + bottom) / 2,
+        href: rawHref,
+        text: labelOf(element).slice(0, 160),
+        type: kindOf(element),
+        area: (right - left) * (bottom - top),
+      };
+    };`;
+}
+
+/**
+ * Libellé fourni : cherche un lien ou un bouton visible dont le libellé correspond
+ * exactement (insensible à la casse, aux accents et aux espaces).
+ */
+async function findExactClickables(tabId, label) {
   const normalizedLabel = normalizeLinkLabelKey(label);
   const expression = `(() => {
     const target = ${JSON.stringify(normalizedLabel)};
-    const normalize = (value) => String(value || "")
-      .normalize("NFD")
-      .replace(/[\\u0300-\\u036f]/g, "")
-      .toLocaleLowerCase("fr")
-      .replace(/\\s+/g, " ")
-      .trim();
-    return Array.from(document.querySelectorAll('a[href], [role="link"]'))
-      .filter((element) => {
-        const rect = element.getBoundingClientRect();
-        const style = window.getComputedStyle(element);
-        if (!rect.width || !rect.height || rect.bottom <= 0 || rect.right <= 0 || rect.top >= window.innerHeight || rect.left >= window.innerWidth) return false;
-        if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0 || style.pointerEvents === "none") return false;
-        if (element.getAttribute("aria-disabled") === "true") return false;
-        const visibleText = String(element.innerText || "").replace(/\\s+/g, " ").trim();
-        const accessibleText = visibleText || element.getAttribute("aria-label") || "";
-        return normalize(accessibleText) === target;
-      })
-      .map((element) => {
-        const rect = element.getBoundingClientRect();
-        const left = Math.max(0, rect.left);
-        const right = Math.min(window.innerWidth, rect.right);
-        const top = Math.max(0, rect.top);
-        const bottom = Math.min(window.innerHeight, rect.bottom);
-        return {
-          x: (left + right) / 2,
-          y: (top + bottom) / 2,
-          href: element.href || element.getAttribute("href") || "",
-        };
-      });
+    ${clickableHelpersSource()}
+    const elements = Array.from(document.querySelectorAll(${JSON.stringify(CLICKABLE_SELECTOR)}));
+    elements.forEach((element, index) => { element.dataset.instavaIndex = String(index); });
+    return elements
+      .filter((element) => isVisible(element) && normalize(labelOf(element)) === target)
+      .map((element) => describe(element));
   })()`;
   const result = await sendCDP(tabId, "Runtime.evaluate", {
     expression,
     returnByValue: true,
     awaitPromise: true,
   });
-  if (result.exceptionDetails) throw new Error("Impossible de vérifier le libellé du lien dans la page.");
-  if (!Array.isArray(result.result?.value)) throw new Error("La page n’a pas renvoyé les liens visibles.");
+  if (result.exceptionDetails) throw new Error("Impossible de vérifier le libellé du lien ou du bouton dans la page.");
+  if (!Array.isArray(result.result?.value)) throw new Error("La page n’a pas renvoyé les éléments cliquables visibles.");
   return result.result.value;
 }
 
 /**
- * Libellé vide : le bot clique tout seul.
- *  - un seul lien visible          → ce lien
- *  - plusieurs liens               → le lien principal : meilleur score surface + texte,
- *    en ignorant la navigation (header/nav/footer/aside) et les liens purement ancrés.
- * Le clic vise le centre de la partie visible du lien.
+ * Libellé vide : le bot clique tout seul le contrôle principal de la page
+ * (lien ou bouton), en privilégiant la surface et le texte hors navigation.
  */
 async function findPrimaryLink(tabId) {
   const expression = `(() => {
     const NAV = 'header, nav, footer, aside, [role="navigation"], [role="banner"], [role="contentinfo"]';
-    const links = Array.from(document.querySelectorAll('a[href], [role="link"]'));
+    ${clickableHelpersSource()}
+    const elements = Array.from(document.querySelectorAll(${JSON.stringify(CLICKABLE_SELECTOR)}));
+    elements.forEach((element, index) => { element.dataset.instavaIndex = String(index); });
     const visible = [];
-    for (const [index, element] of links.entries()) {
-      const rect = element.getBoundingClientRect();
-      if (!rect.width || !rect.height || rect.bottom <= 0 || rect.right <= 0 ||
-          rect.top >= window.innerHeight || rect.left >= window.innerWidth) continue;
-      const style = window.getComputedStyle(element);
-      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0 ||
-          style.pointerEvents === 'none' || element.hasAttribute('disabled') ||
-          element.getAttribute('aria-disabled') === 'true') continue;
-      const rawHref = element.href || element.getAttribute('href') || '';
-      if (!rawHref) continue;
-      let href = rawHref;
-      try { href = new URL(rawHref, document.baseURI).href; } catch {}
-      const current = location.href.split('#')[0];
-      if (href.split('#')[0] === current && (href.includes('#') || rawHref === '#')) continue;
-      if (/^(javascript:|mailto:|tel:)/i.test(rawHref)) continue;
-      const text = String(element.innerText || element.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim();
+    for (const element of elements) {
+      if (!isVisible(element)) continue;
+      if (element instanceof HTMLAnchorElement) {
+        const rawHref = element.href || "";
+        if (!rawHref) continue;
+        const current = location.href.split('#')[0];
+        if (rawHref.split('#')[0] === current && (rawHref.includes('#') || rawHref === '#')) continue;
+        if (/^(javascript:|mailto:|tel:)/i.test(element.getAttribute('href') || '')) continue;
+      }
+      const description = describe(element);
       const inNavigation = Boolean(element.closest(NAV));
-      const left = Math.max(0, rect.left);
-      const right = Math.min(window.innerWidth, rect.right);
-      const top = Math.max(0, rect.top);
-      const bottom = Math.min(window.innerHeight, rect.bottom);
-      const area = (right - left) * (bottom - top);
-      const score = area + text.length * 60 + (inNavigation ? 0 : 4000) + (/\\b(button|btn)\\b/i.test(element.className) ? 800 : 0);
-      visible.push({
-        x: (left + right) / 2,
-        y: (top + bottom) / 2,
-        href,
-        text: text.slice(0, 120),
-        area,
-        score,
-        inNavigation,
-      });
+      const isControl = element.tagName === 'BUTTON' || element.getAttribute('role') === 'button' ||
+        (element.tagName === 'INPUT' && /^(button|submit)$/i.test(element.type));
+      const score = description.area + description.text.length * 60 +
+        (inNavigation ? 0 : 4000) + (isControl ? 1200 : 0);
+      visible.push({ ...description, inNavigation, isControl, score });
     }
     visible.sort((a, b) => b.score - a.score);
     return visible;
@@ -1675,14 +1809,16 @@ async function findPrimaryLink(tabId) {
     returnByValue: true,
     awaitPromise: true,
   });
-  if (result.exceptionDetails) throw new Error("Impossible de repérer les liens cliquables de la page.");
+  if (result.exceptionDetails) throw new Error("Impossible de repérer les éléments cliquables de la page.");
   const links = Array.isArray(result.result?.value) ? result.result.value : [];
   if (!links.length) return { links, picked: null };
-  // Un seul lien : aucune ambiguïté, on le clique. Sinon : le lien principal.
-  if (links.length === 1) return { links, picked: { ...links[0], reason: "seul lien visible" } };
+  if (links.length === 1) return { links, picked: { ...links[0], reason: `seul ${links[0].type} visible` } };
   const main = links.filter((link) => !link.inNavigation);
   const picked = (main.length ? main : links)[0];
-  return { links, picked: { ...picked, reason: main.length ? "lien principal" : "lien principal (toute la page est en navigation)" } };
+  return {
+    links,
+    picked: { ...picked, reason: main.length ? `${picked.type} principal` : `${picked.type} principal (toute la page est en navigation)` },
+  };
 }
 
 /** Clé de comparaison des libellés dans la page (casse, accents, espaces normalisés). */
