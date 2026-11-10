@@ -206,9 +206,31 @@ export function clickableSummary(candidates) {
 }
 
 /**
+ * Ferme proprement un contexte, en récupérant ses cookies au passage.
+ *
+ * C'est ce qui rend possible la règle « on ferme la fenêtre et on continue » :
+ * une page bloquée n'occupe pas un onglet vivant plus longtemps que nécessaire,
+ * mais ce qui a été appris (les cookies) survit au cycle.
+ */
+export async function closeContext(context, { onStorageState = null } = {}) {
+  if (!context) return null;
+  let saved = null;
+  try { saved = await context.storageState(); } catch { saved = null; }
+  await context.close().catch(() => {});
+  if (saved && typeof onStorageState === 'function') {
+    try { onStorageState(saved); } catch { /* jamais bloquant */ }
+  }
+  return saved;
+}
+
+/**
  * Exécute un cycle complet : ouvrir l'URL, attendre la stabilisation, cliquer
  * l'élément demandé (ou l'élément principal), attendre la redirection.
  * Un libellé ambigu ou absent de la page annule le cycle sans clic.
+ *
+ * Dès qu'un blocage est constaté, la fenêtre est fermée sans attendre la fin du
+ * cycle : le worker enchaîne sur la tentative suivante au lieu de laisser un
+ * onglet inutile ouvert.
  */
 export async function runCycle({
   browser,
@@ -261,7 +283,16 @@ export async function runCycle({
     // Cloudflare et équivalents : la page intermédiaire dure 3 à 8 secondes.
     // On lui laisse le temps de se résoudre avant de conclure à un blocage.
     const challenge = await settleChallenge(page, { userUrl: url, waitMs: challengeWaitMs });
-    if (challenge) throw new ChallengeError(challenge, response ? response.status() : null);
+    if (challenge) {
+      // Blocage pare-feu : la décision est déjà prise, la fenêtre n'a plus
+      // aucune raison de rester ouverte une milliseconde de plus.
+      if (challenge.kind === 'blocked') {
+        await closeContext(context, { onStorageState });
+        context = null;
+        throw new ChallengeError(challenge, response ? response.status() : null);
+      }
+      throw new ChallengeError(challenge, response ? response.status() : null);
+    }
 
     const expected = normalizeLabel(linkLabel);
     const candidates = await collectClickables(page, linkLabel);
@@ -309,15 +340,9 @@ export async function runCycle({
       completed_at: new Date().toISOString(),
     };
   } finally {
-    if (context) {
-      // Récupéré avant la fermeture : c'est ce qui donne un « déjà vu » au
-      // prochain cycle (règle 5). Un échec ici ne casse jamais le cycle.
-      try { savedState = await context.storageState(); } catch { savedState = null; }
-      await context.close().catch(() => {});
-    }
-    if (savedState && typeof onStorageState === 'function') {
-      try { onStorageState(savedState); } catch { /* jamais bloquant */ }
-    }
+    // Récupérés avant la fermeture : c'est ce qui donne un « déjà vu » au
+    // prochain cycle (règle 5). Un échec ici ne casse jamais le cycle.
+    if (context) savedState = await closeContext(context, { onStorageState });
   }
 }
 

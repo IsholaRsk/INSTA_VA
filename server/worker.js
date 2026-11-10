@@ -63,16 +63,47 @@ export function createWorker({
   let browserPromise = null;
   const active = new Map();
   let iterations = 0;
+  // Compteur de « la fenêtre est tombée » : visible dans l'interface, et utile
+  // pour distinguer un incident isolé d'un Chromium qui meurt en boucle.
+  const stats = { restarts: 0, failedVisits: 0, blockedVisits: 0 };
+
+  async function launchBrowser() {
+    const instance = await openBrowser({ chromiumPath: config.chromiumPath, headless: config.headless });
+    // Si le moteur meurt en cours de route, la promesse en cache devient un
+    // mensonge : on la jette pour que le prochain cycle en relance un neuf.
+    try {
+      instance.on?.('disconnected', () => {
+        browserPromise = null;
+        if (running) logger.warn('■ Chromium s’est fermé : il sera relancé au prochain cycle.');
+      });
+    } catch { /* certaines implémentations de test n'émettent pas d'événement */ }
+    return instance;
+  }
 
   async function getBrowser() {
     if (!browserPromise) {
-      browserPromise = openBrowser({ chromiumPath: config.chromiumPath, headless: config.headless })
-        .catch((error) => {
-          browserPromise = null;
-          throw error;
-        });
+      browserPromise = launchBrowser().catch((error) => {
+        browserPromise = null;
+        throw error;
+      });
     }
     return browserPromise;
+  }
+
+  /**
+   * Vérifie que le navigateur répond encore ; sinon on repart sur un neuf.
+   * Appelé avant chaque cycle : une fenêtre morte ne doit jamais faire échouer
+   * une visite, elle doit seulement être remplacée.
+   */
+  async function ensureBrowser() {
+    const instance = await getBrowser();
+    let alive = true;
+    try { alive = typeof instance.isConnected === 'function' ? instance.isConnected() : true; } catch { alive = false; }
+    if (alive) return instance;
+    browserPromise = null;
+    await instance.close?.().catch(() => {});
+    logger.warn('■ Navigateur injoignable : relance.');
+    return getBrowser();
   }
 
   function refreshRunStatus(runId) {
@@ -141,7 +172,7 @@ export function createWorker({
     };
 
     try {
-      const browser = await getBrowser();
+      const browser = await ensureBrowser();
       // Toutes les tentatives sont faites : un blocage n'arrête plus la série.
       // On essaie successivement des IP distinctes (nombre fixé par
       // INSTAVA_PROXY_ATTEMPTS), chacune avec les cookies de la cible.
@@ -211,6 +242,16 @@ export function createWorker({
       logger.info(`✓ ${target.pseudo} — ${result.click_kind} « ${result.click_label} » → ${String(result.final_url).slice(0, 90)} · ${via}`);
     } catch (error) {
       const message = friendlyCycleError(error);
+      stats.failedVisits += 1;
+      const crashed = /Target page, context or browser has been closed|Target closed|Browser closed/i.test(String(error?.message || ''));
+      if (crashed) {
+        // La fenêtre est tombée : on la jette et on continue. Le prochain cycle
+        // en relancera une ; cette visite-ci est simplement rejouée par le
+        // calendrier comme un échec ordinaire.
+        stats.restarts += 1;
+        browserPromise = null;
+      }
+      if (error instanceof ChallengeError || error?.name === 'ChallengeError') stats.blockedVisits += 1;
       store.finishVisit(visit.id, 'failed', { message });
       logger.warn(`✗ ${target.pseudo} — ${message}`);
 
@@ -274,7 +315,11 @@ export function createWorker({
   async function loop() {
     if (!running) return;
     try { await tick(); }
-    catch (error) { logger.error('tick échoué', error?.message || error); }
+    catch (error) {
+      // Rien n'arrête la boucle : une erreur du planificateur ou de la base est
+      // consignée, puis le minuteur repart au tour suivant.
+      logger.error('tick échoué', error?.message || error);
+    }
     if (running) timer = setTimeout(loop, config.tickMs);
   }
 
@@ -302,6 +347,7 @@ export function createWorker({
     },
     get activeCount() { return active.size; },
     get isRunning() { return running; },
+    get stats() { return { ...stats, active: active.size, browserAlive: Boolean(browserPromise) }; },
     refreshRunStatus,
     approve(userId, visitId) {
       const visit = store.getVisit(userId, visitId);

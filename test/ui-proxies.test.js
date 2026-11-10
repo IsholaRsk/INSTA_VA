@@ -234,3 +234,74 @@ test('diagnostic : le panneau affiche les cinq contrôles et l’état réel', a
     globalThis.document = previous.document;
   }
 });
+
+test('thème : le panneau d’état du bot reflète le moteur sans jargon', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const { JSDOM } = await import('jsdom');
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  const dom = new JSDOM(html, { url: 'http://127.0.0.1/' });
+  const previous = { window: globalThis.window, document: globalThis.document };
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  try {
+    // Le script de l'application se lance au chargement (boot()) : on lui donne
+    // un fetch qui ne répond jamais, puis on rend ses erreurs muettes, sinon
+    // l'activité asynchrone retarde la fin du test.
+    globalThis.fetch = () => new Promise(() => {});
+    const source = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+    const api = await new Function(`return (async () => { ${source}
+      return { renderBotStatus };
+    })()`)().catch(() => ({ renderBotStatus: null }));
+    assert.ok(api.renderBotStatus, 'renderBotStatus doit être exposée');
+    const text = dom.window.document.getElementById('bot-status-text');
+    const pulse = dom.window.document.querySelector('.bot-pulse');
+    assert.ok(text && pulse, '#bot-status-text et .bot-pulse doivent exister');
+
+    api.renderBotStatus({ running: true, active: 2, restarts: 3, blockedVisits: 7 });
+    assert.match(text.innerHTML, /Bot en marche/);
+    assert.match(text.innerHTML, /2 cycle\(s\) en cours/);
+    assert.match(text.innerHTML, /3 fenêtre\(s\) relancée\(s\)/);
+    assert.match(text.innerHTML, /7 blocage\(s\) traversé\(s\)/);
+    assert.equal(pulse.classList.contains('is-idle'), false, 'le pouls reste actif');
+
+    api.renderBotStatus({ running: false, active: 0 });
+    assert.match(text.innerHTML, /Bot à l’arrêt/);
+    assert.equal(pulse.classList.contains('is-idle'), true);
+  } finally {
+    globalThis.window = previous.window;
+    globalThis.document = previous.document;
+  }
+});
+
+test('thème : la palette sombre cyberpunk reste lisible (contraste AA)', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const css = await readFile(new URL('../public/styles.css', import.meta.url), 'utf8');
+  const read = (name) => {
+    const match = new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{6})`).exec(css);
+    assert.ok(match, `la variable --${name} doit être définie en hexadécimal`);
+    return match[1];
+  };
+  const luminance = (hex) => {
+    const channels = [1, 3, 5].map((start) => parseInt(hex.slice(start, start + 2), 16) / 255)
+      .map((value) => (value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+  };
+  const contrast = (a, b) => {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  };
+
+  const bg = read('bg');
+  const surface = read('surface');
+  // Le fond doit rester très sombre, sinon ce n'est plus un thème sombre.
+  assert.ok(luminance(bg) < 0.02, `fond trop clair : ${bg}`);
+  for (const [label, color] of [['texte', read('text')], ['muted', read('muted')], ['accent', read('accent')]]) {
+    assert.ok(contrast(color, bg) >= 4.5, `${label} sur fond : contraste insuffisant (${contrast(color, bg).toFixed(2)})`);
+    assert.ok(contrast(color, surface) >= 4.5, `${label} sur carte : contraste insuffisant (${contrast(color, surface).toFixed(2)})`);
+  }
+  // Les accents secondaires servent à des badges : seuil AA pour du texte.
+  for (const name of ['cyan', 'magenta', 'violet', 'orange', 'red']) {
+    assert.ok(contrast(read(name), bg) >= 4.5, `--${name} insuffisant sur le fond`);
+  }
+  assert.equal(css.includes('#74efad'), false, 'aucune couleur de l’ancien thème ne subsiste');
+});

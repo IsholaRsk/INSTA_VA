@@ -414,6 +414,22 @@ Deux conséquences concrètes :
 
 **Le bouton Tester te donne désormais ce verdict.** Après un test, chaque proxy affiche la nature de son IP de sortie : `Datacenter · OVH (AS16276)`, `Résidentiel · Free SAS`, ou `Nature d’IP inconnue`. Le compte rendu global indique combien de tes proxys sortent par un hébergeur — s'ils le font tous, la question n'est plus « combien de proxys » mais « quel type de proxys ».
 
+### Thème et robustesse
+
+L'interface utilise un thème sombre « cyberpunk doux » : base bleu-nuit (`#080a12`), halos cyan et magenta très diffus, grille à peine visible, un seul liseré lumineux en haut des cartes. Aucun néon saturé. Tous les contrastes texte/fond dépassent le seuil WCAG AA (4,5:1), y compris les badges de statut. Le manifeste PWA et la couleur de barre du navigateur suivent la même base.
+
+Le bot **ne s'arrête jamais** :
+
+| Situation | Comportement |
+|---|---|
+| Page de blocage (1020) détectée | Fenêtre fermée immédiatement, cycle suivant enchaîné |
+| Challenge Cloudflare | Attente bornée (`INSTAVA_CHALLENGE_WAIT_MS`), puis fermeture et tentative suivante |
+| Chromium meurt en cours de route | Détecté (`isConnected` + événement `disconnected`), relancé au cycle suivant, visite consignée |
+| Erreur du planificateur ou de la base | Consignée, la boucle reprend au tick suivant |
+| Visite échouée | Consignée, **aucune annulation de série** |
+
+L'état est visible dans l'application, bloc **Bot en marche** : cycles en cours, nombre de fenêtres relancées, nombre de blocages traversés. Ces mêmes chiffres sont dans `/api/health` (`worker.restarts`, `worker.blockedVisits`, `worker.browserAlive`).
+
 ### Vitesse et tentatives
 
 Le bot avance maintenant à la vitesse de Chromium, plus à celle d'un minuteur.
