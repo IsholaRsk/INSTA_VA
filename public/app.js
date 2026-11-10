@@ -492,11 +492,39 @@ function renderActivity(visits) {
   });
 }
 
+/**
+ * État du moteur, affiché en clair : le bot ne s'arrête pas, et quand une
+ * fenêtre meurt il en relance une. Ces chiffres le prouvent à l'écran.
+ */
+function renderBotStatus(worker = {}) {
+  const box = $('#bot-status');
+  const text = $('#bot-status-text');
+  if (!box || !text) return;
+  const pulse = box.querySelector('.bot-pulse');
+  const running = Boolean(worker.running);
+  pulse?.classList.toggle('is-idle', !running);
+  const parts = [];
+  parts.push(running ? '<strong>Bot en marche</strong>' : '<strong>Bot à l’arrêt</strong>');
+  if (running) {
+    parts.push(`${Number(worker.active || 0)} cycle(s) en cours`);
+    const restarts = Number(worker.restarts || 0);
+    if (restarts) parts.push(`${restarts} fenêtre(s) relancée(s)`);
+    const blocked = Number(worker.blockedVisits || 0);
+    if (blocked) parts.push(`${blocked} blocage(s) traversé(s)`);
+    if (worker.browserAlive === false) parts.push('navigateur en cours de relance');
+  }
+  text.innerHTML = parts.join(' · ');
+}
+
 async function loadActivity() {
   if (loadingActivity || workspace.classList.contains('hidden')) return;
   loadingActivity = true;
   try {
-    const data = await apiRequest('/api/visits');
+    const [data, health] = await Promise.all([
+      apiRequest('/api/visits'),
+      apiRequest('/api/health').catch(() => null),
+    ]);
+    if (health?.worker) renderBotStatus(health.worker);
     renderRuns(Array.isArray(data.runs) ? data.runs : []);
     renderJournal(Array.isArray(data.clicksByTarget) ? data.clicksByTarget : [], Number(data.todayTotal || 0));
     renderActivity(Array.isArray(data.visits) ? data.visits : []);

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#07110f">
+  <meta name="theme-color" content="#080a12">
   <meta name="description" content="Interface mobile InstaVA pour gérer des cycles URL vers lien.">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -206,6 +206,10 @@
           <div class="section-heading">
             <div><p class="eyebrow">Suivi</p><h2 id="activity-title">Activité récente</h2></div>
             <button id="refresh-activity" class="button button-quiet button-small" type="button">Actualiser</button>
+          </div>
+          <div id="bot-status" class="bot-status" aria-live="polite">
+            <span class="bot-pulse" aria-hidden="true"></span>
+            <span id="bot-status-text">Vérification de l’état du bot…</span>
           </div>
           <div id="run-list" class="run-list"></div>
           <div id="activity-list" class="activity-list"><div class="empty-state">Aucun cycle lancé.</div></div>

@@ -45,6 +45,7 @@ export function createApp({
   runCycle,
   startWorker = true,
   limits = LIMITS,
+  scheduler: providedScheduler = null,
 }) {
   const auth = createAuth({ store, config });
 
@@ -73,7 +74,9 @@ export function createApp({
   }
 
   if (openBrowser && runCycle) {
-    scheduler = createScheduler({ store, config, log: (message) => logger.info(message) });
+    // Un planificateur peut être fourni (tests de résilience) : la boucle doit
+    // alors survivre à ses erreurs, pas les masquer.
+    scheduler = providedScheduler || createScheduler({ store, config, log: (message) => logger.info(message) });
     worker = createWorker({
       store, config, scheduler, openBrowser, runCycle, decryptProxy: pickProxy, logger,
       // Résultat d'un cycle imputé au proxy réellement utilisé.
@@ -103,7 +106,9 @@ export function createApp({
       firstRun: !ownerExists,
       setupOpen: !ownerExists || config.allowSignup,
       signupCodeRequired: Boolean(config.signupCode),
-      worker: worker ? { running: worker.isRunning, active: worker.activeCount } : { running: false, active: 0 },
+      worker: worker
+        ? { running: worker.isRunning, active: worker.activeCount, ...(worker.stats || {}) }
+        : { running: false, active: 0 },
     });
   }, { auth: false });
 
