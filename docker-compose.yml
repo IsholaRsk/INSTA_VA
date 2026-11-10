@@ -1,0 +1,74 @@
+name: instava
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: instava-bot:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Chemins fixes à l'intérieur du conteneur (ne pas modifier sans le volume).
+      DATA_DIR: /app/data
+      PORT: "8080"
+      HOST: 0.0.0.0
+      INSTAVA_TRUST_PROXY: "true"
+      # Caddy fait le HTTPS : le cookie de session doit être Secure.
+      INSTAVA_SECURE_COOKIES: "true"
+    volumes:
+      - instava_data:/app/data
+    # Le port n'est PAS publié sur Internet : seul Caddy y accède sur le réseau interne.
+    expose:
+      - "8080"
+    networks:
+      - instava_net
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    # Chromium a besoin d'un /dev/shm suffisant et d'un nombre de processus raisonnable.
+    shm_size: "1gb"
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - bot
+    environment:
+      INSTAVA_DOMAIN: ${INSTAVA_DOMAIN:?Définissez INSTAVA_DOMAIN dans .env}
+      INSTAVA_EMAIL: ${INSTAVA_EMAIL:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - instava_net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  instava_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  instava_net:
+    driver: bridge

@@ -1,0 +1,50 @@
+# Caddy : HTTPS automatique (Let's Encrypt) + en-têtes durcis + journal sans secrets.
+{
+	# Courriel de contact pour Let's Encrypt (facultatif mais recommandé).
+	email {$INSTAVA_EMAIL}
+	# Pas de journal des URL : on ne veut ni identifiants ni jetons de session.
+	admin off
+}
+
+{$INSTAVA_DOMAIN} {
+	encode zstd gzip
+
+	# Le bot écoute sur le réseau interne Docker ; il n'est jamais exposé directement.
+	reverse_proxy bot:8080 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		# Les cycles Playwright peuvent dépasser 60 s (chargement, clic, redirection).
+		transport http {
+			read_timeout 120s
+			write_timeout 120s
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		# L'application et les en-têtes sont déjà gérés par Node ; Caddy ne les duplique pas.
+		-Server
+	}
+
+	# Pas de cache sur l'API ni sur le service worker.
+	@noCache path /api/* /sw.js
+	header @noCache Cache-Control "no-store"
+
+	log {
+		output file /data/access.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+		format json
+		# Confidentialité : on ne journalise ni l'URL complète, ni le cookie.
+		format filter {
+			wrap json
+			fields {
+				request>headers>Cookie delete
+				request>headers>Authorization delete
+			}
+		}
+	}
+}

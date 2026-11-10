@@ -1,4 +1,4 @@
-const CACHE_NAME = 'instava-mobile-v1';
+const CACHE_NAME = 'instava-bot-v2';
 const SHELL = [
   '/',
   '/index.html',

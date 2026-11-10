@@ -210,32 +210,33 @@ test('target visits are no longer capped by the old 50 limit', () => {
   }
 });
 
-test('duration stays bounded to 1-52 weeks', () => {
-  assert.equal(utils.parseTargetWeeks('1'), 1);
-  assert.equal(utils.parseTargetWeeks('52'), 52);
-  for (const value of ['0', '53', '', '2.5', 'deux']) assert.equal(utils.parseTargetWeeks(value), null);
+test('duration is expressed in days, bounded to 1-365', () => {
+  assert.equal(utils.parseTargetDays('1'), 1);
+  assert.equal(utils.parseTargetDays('7'), 7);
+  assert.equal(utils.parseTargetDays('365'), 365);
+  for (const value of ['0', '366', '', '2.5', 'deux', '-7']) assert.equal(utils.parseTargetDays(value), null);
 });
 
 test('goal mode visits exactly the requested count without any draw', () => {
   assert.deepEqual(utils.executionBounds('goal', 500), { min: 500, max: 500, exact: true });
-  for (const value of [0, 0.5, 0.999999]) {
-    assert.equal(utils.planVisits('goal', 500, () => value), 500);
-  }
-  assert.equal(utils.executionBounds('interval', 10).exact, false);
+  assert.equal(utils.planVisits('goal', 500), 500);
 });
 
-test('interval mode keeps the historical ±10 draw and stays in bounds', () => {
-  assert.deepEqual(utils.executionBounds('interval', 10), { min: 1, max: 20, exact: false });
-  assert.deepEqual(utils.executionBounds('interval', 3), { min: 1, max: 13, exact: false });
-  assert.equal(utils.planVisits('interval', 3, () => 0), 1);
-  assert.equal(utils.planVisits('interval', 3, () => 0.999999), 13);
-  for (const target of [1, 10, 100, 5000]) {
-    const bounds = utils.executionBounds('interval', target);
-    for (const value of [0, 0.37, 0.99]) {
-      const planned = utils.planVisits('interval', target, () => value);
-      assert.ok(planned >= bounds.min && planned <= bounds.max, `${planned} hors de ${bounds.min}-${bounds.max}`);
-    }
-  }
+test('interval mode runs the exact count but keeps at least 100 clicks per day', () => {
+  // Aucun tirage : le nombre saisi est exécuté tel quel.
+  assert.deepEqual(utils.executionBounds('interval', 10), { min: 10, max: 10, exact: true });
+  assert.equal(utils.planVisits('interval', 10), 10);
+  // Sur une durée donnée, on ne descend jamais sous 100 clics par jour.
+  assert.equal(utils.planVisits('interval', 50, { enforceDaily: true, days: 1 }), 100);
+  assert.equal(utils.planVisits('interval', 50, { enforceDaily: true, days: 3 }), 300);
+  assert.equal(utils.planVisits('interval', 500, { enforceDaily: true, days: 3 }), 500);
+  assert.equal(utils.dailyMinimumVisits(1), 100);
+  assert.equal(utils.dailyMinimumVisits(7), 700);
+  // Débit maximal : 5 minutes d'écart => 288 clics par jour.
+  assert.equal(utils.maxVisitsPerDay(5 * 60 * 1000), 288);
+  assert.deepEqual(utils.fitVisitsToRate(40, 1), { count: 100, requested: 40, minimum: 100, maximum: 288, adjusted: true });
+  assert.equal(utils.fitVisitsToRate(500, 1).count, 288);
+  assert.equal(utils.fitVisitsToRate(2000, 5).count, 1440);
 });
 
 test('batched visits keep a jittered delay around the base interval', () => {
@@ -260,5 +261,62 @@ test('target modes describe what the bot will do', () => {
   assert.equal(utils.normalizeTargetMode('INTERVAL'), 'interval');
   assert.equal(utils.normalizeTargetMode('autre'), 'interval');
   assert.match(utils.describeTargetPlan({ mode: 'goal', executionTarget: 3000, linkLabel: '' }), /3000 visite\(s\) d’affilée/);
-  assert.match(utils.describeTargetPlan({ mode: 'interval', executionTarget: 10, durationWeeks: 2, linkLabel: '' }), /tirage 1–20/);
+  assert.match(utils.describeTargetPlan({ mode: 'interval', executionTarget: 10, durationDays: 7, linkLabel: '' }), /10 sur 7 jour\(s\)/);
+});
+
+test('daily planning spreads visits over days with a real minimum gap', () => {
+  const start = Date.parse('2026-11-08T00:00:00Z');
+  const times = utils.buildDailyRunTimes(300, 1, start);
+  assert.equal(times.length, 300);
+  for (let index = 1; index < times.length; index += 1) {
+    assert.ok(times[index] - times[index - 1] >= 5 * 60 * 1000, 'écart minimal de 5 minutes respecté');
+  }
+  // 1 journée ne peut pas tenir plus de 288 clics : le surplus passe le lendemain.
+  const perDay = {};
+  for (const time of times) {
+    const day = Math.floor((time - start) / utils.DAY_MS);
+    perDay[day] = (perDay[day] || 0) + 1;
+  }
+  assert.equal(perDay[0], 288);
+  assert.equal(perDay[1], 12);
+});
+
+test('daily planning gives every day at least 100 clicks', () => {
+  const start = Date.parse('2026-11-08T00:00:00Z');
+  for (const [count, days] of [[300, 3], [1000, 7], [700, 7]]) {
+    const times = utils.buildDailyRunTimes(count, days, start);
+    assert.equal(times.length, count);
+    const perDay = {};
+    for (const time of times) {
+      const day = Math.floor((time - start) / utils.DAY_MS);
+      perDay[day] = (perDay[day] || 0) + 1;
+    }
+    for (let day = 0; day < days; day += 1) {
+      assert.ok((perDay[day] || 0) >= Math.min(100, Math.ceil(count / days)), `jour ${day} : ${perDay[day]} clics`);
+    }
+  }
+  assert.deepEqual(utils.dailyVisitQuota(1000, 7), [143, 143, 143, 143, 143, 143, 142]);
+});
+
+test('daily journal guarantees 100 clicks per day and catches up a missed day', () => {
+  // Quota du plan faible (40/jour) : le minimum de 100 prend le relais.
+  assert.equal(utils.dailyClickTarget({ doneToday: 0, plannedToday: 40, minimumToday: 100 }), 100);
+  assert.equal(utils.needsMoreToday({ doneToday: 99, plannedToday: 40, minimumToday: 100 }), true);
+  assert.equal(utils.needsMoreToday({ doneToday: 100, plannedToday: 40, minimumToday: 100 }), false);
+  // Quota du plan supérieur au minimum : il prime.
+  assert.equal(utils.needsMoreToday({ doneToday: 140, plannedToday: 150, minimumToday: 100 }), true);
+  assert.equal(utils.needsMoreToday({ doneToday: 150, plannedToday: 150, minimumToday: 100 }), false);
+  // Journée manquée : rattrapage plafonné à 100 clics de retard.
+  assert.equal(utils.dailyClickTarget({ doneToday: 0, plannedToday: 40, minimumToday: 100, backlog: 100 }), 200);
+  assert.equal(utils.dailyClickTarget({ doneToday: 50, plannedToday: 40, minimumToday: 100, backlog: 500 }), 200);
+});
+
+test('daily journal keeps only recent days', () => {
+  const journal = { '2026-11-01': 12, '2026-11-06': 100, '2026-11-07': 99, 'bidon': 4 };
+  // Fenêtre inclusive : 7 jours conservés = du 1er au 7 novembre.
+  const pruned = utils.pruneDailyJournal(journal, 7, Date.parse('2026-11-07T12:00:00Z'));
+  assert.deepEqual(Object.keys(pruned).sort(), ['2026-11-01', '2026-11-06', '2026-11-07']);
+  const short = utils.pruneDailyJournal(journal, 2, Date.parse('2026-11-07T12:00:00Z'));
+  assert.deepEqual(Object.keys(short).sort(), ['2026-11-06', '2026-11-07']);
+  assert.equal(utils.dayKey(Date.parse('2026-11-07T23:59:00Z')), '2026-11-07');
 });
