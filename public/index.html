@@ -135,7 +135,19 @@
           <form id="proxy-form" class="form-grid">
             <div class="field full-field">
               <label for="proxy-text">Liste des proxys</label>
-              <textarea id="proxy-text" rows="6" spellcheck="false" maxlength="400000" placeholder="proxy1.webshare.io:8080:identifiant:motdepasse&#10;proxy2.webshare.io:8080:identifiant:motdepasse&#10;...&#10;&#10;Formats acceptés : hôte:port:identifiant:motdepasse · identifiant:motdepasse@hôte:port · socks5://identifiant:motdepasse@hôte:port · hôte:port"></textarea>
+              <textarea id="proxy-text" rows="6" spellcheck="false" maxlength="500000" placeholder="proxy1.webshare.io:8080:identifiant:motdepasse&#10;proxy2.webshare.io:8080:identifiant:motdepasse&#10;...&#10;&#10;Formats acceptés : hôte:port:identifiant:motdepasse · identifiant:motdepasse@hôte:port · socks5://identifiant:motdepasse@hôte:port · hôte:port"></textarea>
+            </div>
+            <div class="field full-field">
+              <div id="proxy-drop" class="proxy-drop">
+                <input id="proxy-file" type="file" accept=".txt,.csv,.list,.proxies,text/plain" class="visually-hidden">
+                <p class="proxy-drop-title">Ou dépose ton fichier <code>.txt</code> ici</p>
+                <p class="proxy-drop-help">Une ligne par proxy. Le contenu remplit la zone ci-dessus : rien n’est envoyé avant que tu cliques sur <strong>Importer la liste</strong>. Formats d’export Webshare et ProxyScrape acceptés tels quels.</p>
+                <div class="proxy-drop-actions">
+                  <button id="proxy-file-button" class="button button-quiet" type="button">Choisir un fichier</button>
+                  <button id="proxy-file-clear" class="button button-quiet hidden" type="button">Retirer le fichier</button>
+                </div>
+                <p id="proxy-file-name" class="proxy-drop-file hidden" aria-live="polite"></p>
+              </div>
             </div>
             <div class="field">
               <label for="proxy-scheme">Type par défaut</label>

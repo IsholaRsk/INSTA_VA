@@ -311,3 +311,51 @@ test('proxys : réimporter la même liste ne produit pas d’erreur', async () =
     assert.match(again.data.message, /déjà dans la liste/);
   } finally { await ctx.close(); }
 });
+
+test('proxys : un fichier de plusieurs milliers de lignes passe (au-delà des 64 Ko par défaut)', async () => {
+  const ctx = await startServer();
+  try {
+    const { cookie } = await call(ctx, 'POST', '/api/auth/register', { email: 'fichier@exemple.test', password: 'motdepasse-solide' });
+    // 2000 lignes ≈ 125 Ko : impossible avant l'élargissement du corps JSON.
+    const lines = [];
+    for (let index = 1; index <= 2000; index += 1) {
+      lines.push(`proxy${index}.exemple.fr:${8000 + (index % 1000)}:identifiantfictif:motdepassefictif`);
+    }
+    const text = lines.join('\r\n'); // fins de ligne Windows, comme un fichier .txt exporté
+    assert.ok(text.length > 64 * 1024, 'le test doit dépasser l’ancienne limite');
+    const imported = await call(ctx, 'POST', '/api/proxies', { text }, cookie);
+    assert.equal(imported.status, 201);
+    assert.equal(imported.data.added, 2000);
+    const listed = await call(ctx, 'GET', '/api/proxies', null, cookie);
+    assert.equal(listed.data.totals.count, 2000);
+  } finally { await ctx.close(); }
+});
+
+test('proxys : un envoi au-delà de la limite est refusé avec un message explicite', async () => {
+  const ctx = await startServer();
+  try {
+    const { cookie } = await call(ctx, 'POST', '/api/auth/register', { email: 'tropgros@exemple.test', password: 'motdepasse-solide' });
+    const text = 'proxy.exemple.fr:8080:identifiantfictif:motdepassefictif\n'.repeat(60000);
+    const rejected = await call(ctx, 'POST', '/api/proxies', { text }, cookie);
+    assert.equal(rejected.status, 413);
+    assert.match(rejected.data.error, /trop volumineux/i);
+  } finally { await ctx.close(); }
+});
+
+test('proxys : un import partiel donne les numéros de ligne et un compte rendu honnête', async () => {
+  const ctx = await startServer();
+  try {
+    const { cookie } = await call(ctx, 'POST', '/api/auth/register', { email: 'partiel@exemple.test', password: 'motdepasse-solide' });
+    const lines = Array.from({ length: 10 }, (_, index) => `proxy${index + 1}.exemple.fr:${8000 + index}:identifiantfictif:motdepassefictif`);
+    lines[3] = 'ceci-nest-pas-un-proxy';
+    lines[7] = 'trop:de:champs:ici:encore';
+    const imported = await call(ctx, 'POST', '/api/proxies', { text: lines.join('\n') }, cookie);
+    assert.equal(imported.status, 201);
+    assert.equal(imported.data.partial, true);
+    // Les lignes mal formées doivent être localisables dans le fichier d'origine.
+    const lines1 = imported.data.errors.map((error) => error.line).sort((a, b) => a - b);
+    assert.deepEqual(lines1, [4, 8]);
+    // Le total annoncé ne peut pas dépasser les 10 lignes du fichier.
+    assert.match(imported.data.message, /sur 10\./);
+  } finally { await ctx.close(); }
+});

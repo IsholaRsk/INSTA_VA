@@ -664,6 +664,65 @@ async function loadProxyStatus() {
   }
 }
 
+/* ------------------------------ import fichier ----------------------------- */
+
+const MAX_PROXY_FILE_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Décode un fichier de proxys. Les exports Webshare sont en UTF-8, mais un
+ * fichier récupéré sur Windows peut être en UTF-16 ou porter un BOM : sans ça,
+ * la première ligne contiendrait des caractères invisibles et serait rejetée.
+ */
+async function decodeProxyFile(file) {
+  const buffer = new Uint8Array(await file.arrayBuffer());
+  if (!buffer.length) throw new Error('Le fichier est vide.');
+  if (buffer[0] === 0xff && buffer[1] === 0xfe) return new TextDecoder('utf-16le').decode(buffer);
+  if (buffer[0] === 0xfe && buffer[1] === 0xff) return new TextDecoder('utf-16be').decode(buffer);
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buffer).replace(/^\uFEFF/, '');
+  } catch {
+    // Fichier dans un autre encodage : le latin-1 ne perd jamais d'octet.
+    return new TextDecoder('latin1').decode(buffer);
+  }
+}
+
+async function readProxyFile(file) {
+  if (!file) return;
+  if (file.size > MAX_PROXY_FILE_BYTES) {
+    setFileMessage(`Fichier trop volumineux (${Math.round(file.size / 1024)} Ko). Limite : 2 Mo.`, true);
+    return;
+  }
+  try {
+    const content = await decodeProxyFile(file);
+    // Fins de ligne Windows, tabs, espaces insécables : on normalise avant import.
+    const cleaned = content.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ').trim();
+    if (!cleaned) { setFileMessage('Le fichier ne contient aucune ligne exploitable.', true); return; }
+    $('#proxy-text').value = cleaned;
+    const lines = cleaned.split('\n').filter((line) => line.trim() && !line.trim().startsWith('#')).length;
+    setFileMessage(`${file.name} — ${lines} ligne(s) prête(s). Vérifie, puis clique sur « Importer la liste ».`);
+    setFormMessage($('#proxy-message'), '');
+    $('#proxy-file-clear').classList.remove('hidden');
+    $('#proxy-text').scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+  } catch (error) {
+    setFileMessage(displayError(error, 'Lecture du fichier impossible.'), true);
+  }
+}
+
+function setFileMessage(message, isError = false) {
+  const target = $('#proxy-file-name');
+  target.textContent = message;
+  target.classList.toggle('hidden', !message);
+  target.classList.toggle('is-error', Boolean(isError));
+}
+
+function clearProxyFile() {
+  $('#proxy-file').value = '';
+  $('#proxy-text').value = '';
+  $('#proxy-file-clear').classList.add('hidden');
+  setFileMessage('');
+  $('#proxy-text').focus();
+}
+
 async function saveProxy(event) {
   event.preventDefault();
   const button = $('#save-proxy');
@@ -688,10 +747,14 @@ async function saveProxy(event) {
     $('#proxy-text').value = '';
     $('#proxy-username').value = '';
     $('#proxy-password').value = '';
+    $('#proxy-file').value = '';
+    $('#proxy-file-clear').classList.add('hidden');
+    setFileMessage('');
     const details = Array.isArray(data.errors) && data.errors.length
       ? ` Premières lignes rejetées : ${data.errors.slice(0, 3).map((error) => `ligne ${error.line || '?'} (${error.message})`).join(' ; ')}.`
       : '';
-    const kind = data.rejected && !data.added ? 'error' : 'success';
+    // Un import partiel est signalé comme tel, même si une partie est passée.
+    const kind = data.rejected ? 'error' : 'success';
     setFormMessage($('#proxy-message'), `${data.message}${details}`, kind);
     await loadProxyStatus();
   } catch (error) {
@@ -799,6 +862,26 @@ async function boot() {
   $('#test-proxies').addEventListener('click', () => testProxies(null, $('#test-proxies')));
   $('#proxy-enabled').addEventListener('change', saveProxyState);
   $('#proxy-rotation').addEventListener('change', saveProxyState);
+
+  // Import depuis un fichier texte : bouton, sélection, ou glisser-déposer.
+  const fileInput = $('#proxy-file');
+  const dropZone = $('#proxy-drop');
+  $('#proxy-file-button').addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files && fileInput.files[0]) readProxyFile(fileInput.files[0]);
+  });
+  $('#proxy-file-clear').addEventListener('click', clearProxyFile);
+  ['dragenter', 'dragover'].forEach((type) => dropZone.addEventListener(type, (event) => {
+    event.preventDefault();
+    dropZone.classList.add('is-over');
+  }));
+  ['dragleave', 'dragend'].forEach((type) => dropZone.addEventListener(type, () => dropZone.classList.remove('is-over')));
+  dropZone.addEventListener('drop', (event) => {
+    event.preventDefault();
+    dropZone.classList.remove('is-over');
+    const file = event.dataTransfer?.files?.[0];
+    if (file) readProxyFile(file);
+  });
   $('#refresh-activity').addEventListener('click', loadActivity);
   $('#logout-button').addEventListener('click', logout);
 

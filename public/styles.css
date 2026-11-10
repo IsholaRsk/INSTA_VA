@@ -30,6 +30,7 @@ button, input, select { font: inherit; }
 button { color: inherit; }
 button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .hidden { display: none !important; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .app-shell { width: min(100% - 40px, 1040px); margin: 0 auto; padding: max(18px, env(safe-area-inset-top)) 0 max(20px, env(safe-area-inset-bottom)); }
 .topbar { height: 64px; display: flex; align-items: center; justify-content: space-between; margin-bottom: 42px; }
 .brand { color: var(--text); text-decoration: none; display: inline-flex; align-items: center; gap: 11px; }
@@ -118,7 +119,15 @@ input:focus, select:focus { border-color: rgba(116, 239, 173, .65); box-shadow: 
 .check-row strong { font-size: 12px; }
 .check-row small { max-width: 290px; color: var(--muted); font-size: 10px; line-height: 1.45; }
 .proxy-copy { color: #9bb0a5; font-size: 12px; line-height: 1.6; max-width: 760px; margin: -7px 0 19px; }
-.proxy-copy code { color: #cfe6d8; background: rgba(171, 212, 194, .1); border-radius: 5px; padding: 1px 5px; font-size: 11px; }
+.proxy-drop { border: 1px dashed rgba(171, 212, 194, .22); border-radius: 12px; padding: 14px 16px; text-align: center; background: rgba(5, 15, 11, .25); transition: border-color .15s, background .15s; }
+.proxy-drop.is-over { border-color: var(--accent, #35d08a); background: rgba(80, 200, 128, .08); }
+.proxy-drop-title { margin: 0 0 5px; font-size: 12px; font-weight: 600; color: #d6ece0; }
+.proxy-drop-title code { color: #cfe6d8; background: rgba(171, 212, 194, .1); border-radius: 5px; padding: 1px 5px; font-size: 11px; }
+.proxy-drop-help { margin: 0 0 11px; color: #8fa59a; font-size: 10.5px; line-height: 1.55; }
+.proxy-drop-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; }
+.proxy-drop-file { margin: 11px 0 0; color: var(--accent, #35d08a); font-size: 10.5px; overflow-wrap: anywhere; }
+.proxy-drop-file.is-error { color: var(--red); }
+.proxy-drop code { color: #cfe6d8; background: rgba(171, 212, 194, .1); border-radius: 5px; padding: 1px 5px; font-size: 11px; }
 .form-grid textarea { width: 100%; min-height: 118px; resize: vertical; padding: 11px 12px; border-radius: 11px; border: 1px solid var(--line); background: rgba(4, 13, 9, .55); color: var(--text); font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.6; }
 .form-grid textarea:focus { outline: 2px solid rgba(80, 200, 128, .35); outline-offset: 1px; }
 .proxy-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin: 18px 0 10px; padding-top: 14px; border-top: 1px solid rgba(171, 212, 194, .1); }

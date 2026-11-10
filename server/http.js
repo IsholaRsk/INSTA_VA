@@ -61,7 +61,7 @@ export async function readJsonBody(req, maxBytes = 64 * 1024) {
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > maxBytes) throw new HttpError(413, 'Requête trop volumineuse.');
+    if (size > maxBytes) throw new HttpError(413, `Envoi trop volumineux (limite ${Math.round(maxBytes / 1024)} Ko). Découpe la liste ou importe le fichier par lots successifs.`);
     chunks.push(chunk);
   }
   if (!size) return {};

@@ -9,6 +9,11 @@ const utils = globalThis.InstaVAUtils;
 
 export const MAX_PROXY_LINES_PER_IMPORT = 5000;
 
+// 5000 lignes de ~180 caractères dépassent largement les 64 Ko du corps JSON
+// par défaut : l'import de fichier a droit à son propre budget.
+export const MAX_PROXY_IMPORT_BYTES = 2 * 1024 * 1024;
+export const MAX_PROXY_IMPORT_CHARS = Math.floor(MAX_PROXY_IMPORT_BYTES / 4);
+
 /**
  * Analyse un texte collé (un proxy par ligne) et renvoie les entrées valides
  * et les lignes rejetées, avec un compte rendu lisible.
