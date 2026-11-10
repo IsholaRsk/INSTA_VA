@@ -175,6 +175,7 @@ input:focus, select:focus { border-color: rgba(116, 239, 173, .65); box-shadow: 
 .activity-body p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
 .activity-body .result-link { color: #b2d5c1; text-decoration: none; }
 .activity-body .result-link:hover { text-decoration: underline; }
+.activity-exit { margin: 5px 0 0; color: #8fb3a2; font-size: 10px; font-variant-numeric: tabular-nums; }
 .activity-meta { color: #81978c; font-size: 9px; white-space: nowrap; }
 .activity-actions { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
 .activity-actions .button { min-height: 31px; padding: 0 9px; font-size: 10px; }
@@ -218,7 +219,8 @@ footer { display: flex; justify-content: space-between; gap: 12px; color: #71877
   .target-actions { grid-column: 2; }
   .target-actions .button { flex: 1; }
   .activity-item { grid-template-columns: 8px minmax(0, 1fr); gap: 9px; }
-  .activity-meta { grid-column: 2; margin-top: -4px; }
+  .activity-exit { margin: 5px 0 0; color: #8fb3a2; font-size: 10px; font-variant-numeric: tabular-nums; }
+.activity-meta { grid-column: 2; margin-top: -4px; }
   .activity-actions { grid-column: 2; align-items: flex-start; flex-direction: row; }
   .welcome-row { align-items: flex-start; flex-direction: column; }
   footer { flex-direction: column; }

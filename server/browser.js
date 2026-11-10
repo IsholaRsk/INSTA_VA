@@ -288,6 +288,8 @@ export async function runCycle({
       click_href: choice.href || null,
       redirected: true,
       exit_ip: exitIp,
+      // Hôte du proxy réellement appliqué au contexte (null = sortie directe).
+      proxy_host: proxy?.host || null,
       completed_at: new Date().toISOString(),
     };
   } finally {
