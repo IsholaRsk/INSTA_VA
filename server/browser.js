@@ -320,6 +320,11 @@ async function settleChallenge(page, { userUrl = '', waitMs = 12000 } = {}) {
   while (Date.now() < deadline) {
     const snapshot = await readSnapshot(page, userUrl);
     if (!snapshot.challenge) return null;
+    // Blocage pare-feu (1020) : la décision est déjà prise côté Cloudflare.
+    // Attendre 15 s ne changerait rien et retarderait inutilement le cycle.
+    if (snapshot.challenge.kind === 'blocked') {
+      return { ...snapshot.challenge, debug: challengeDebugInfo(snapshot) };
+    }
     last = snapshot;
     await page.waitForTimeout(700);
   }
