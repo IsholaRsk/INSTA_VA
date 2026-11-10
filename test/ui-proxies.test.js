@@ -188,3 +188,49 @@ test('test des proxys : la nature de l’IP de sortie est affichée, datacenter 
     globalThis.document = previous.document;
   }
 });
+
+test('diagnostic : le panneau affiche les cinq contrôles et l’état réel', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const { JSDOM } = await import('jsdom');
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  const dom = new JSDOM(html, { url: 'http://127.0.0.1/' });
+  const previous = { window: globalThis.window, document: globalThis.document };
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  try {
+    for (const id of ['diagnostic-list', 'diagnostic-badge', 'clear-sessions', 'diagnostic-message']) {
+      assert.ok(dom.window.document.getElementById(id), `#${id} doit exister`);
+    }
+    const source = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+    // Serveur simulé : un proxy datacenter, empreinte correcte, aucune session.
+    globalThis.fetch = async (input) => {
+      if (String(input).includes('/api/diagnostic')) {
+        return new Response(JSON.stringify({
+          fingerprint: { ok: true, uaVersion: '158', note: 'JA3 produit par Chromium.' },
+          proxies: { total: 1, enabled: 1, datacenter: 1, residential: 0, unknown: 0, priority: false },
+          sessions: 0,
+          rules: { ip: 'Aucun proxy résidentiel identifié.', cookies: 'Aucune session.' },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    const api = await new Function(`return (async () => { ${source}
+      return { loadDiagnostic };
+    })()`)();
+    await api.loadDiagnostic();
+    const rows = [...dom.window.document.querySelectorAll('.diagnostic-row')];
+    assert.equal(rows.length, 4, 'IP, réputation, TLS, cookies');
+    const text = rows.map((row) => row.textContent).join(' ');
+    assert.match(text, /IP et réseau/);
+    assert.match(text, /Réputation/);
+    assert.match(text, /Empreinte TLS/);
+    assert.match(text, /Cookies/);
+    // Un seul proxy datacenter : le premier contrôle doit être signalé.
+    assert.ok(rows[0].classList.contains('is-bad'), 'le manque de résidentiel est signalé');
+    assert.match(dom.window.document.getElementById('diagnostic-badge').textContent, /bloquant/);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } finally {
+    globalThis.window = previous.window;
+    globalThis.document = previous.document;
+  }
+});

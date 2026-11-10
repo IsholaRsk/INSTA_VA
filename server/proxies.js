@@ -75,8 +75,21 @@ export function decryptProxyRow(row, secretKey) {
 export function nextProxy(store, userId, { random = Math.random } = {}) {
   const state = store.getProxyState(userId);
   if (!state.enabled) return null;
-  const candidates = store.listProxies(userId).filter((proxy) => proxy.enabled);
-  if (!candidates.length) return null;
+  const all = store.listProxies(userId).filter((proxy) => proxy.enabled);
+  if (!all.length) return null;
+
+  // Règle 1 : Cloudflare juge d'abord le réseau de l'IP. Un proxy résidentiel
+  // passé le test a donc la priorité sur toute la liste d'hébergeurs. Si aucun
+  // n'a été identifié comme résidentiel, on garde la liste complète : mieux
+  // vaut tenter une IP datacenter que ne rien faire du tout.
+  const known = all.filter((proxy) => proxy.ip_kind);
+  const residential = known.filter((proxy) => proxy.ip_kind === 'residential');
+  const untested = all.filter((proxy) => !proxy.ip_kind);
+  let candidates = all;
+  if (residential.length) {
+    // Les IP non testées restent éligibles : elles peuvent être résidentielles.
+    candidates = [...residential, ...untested];
+  }
 
   // En mode aléatoire, on écarte le proxy du cycle précédent : deux visites de
   // suite depuis la même IP, c'est exactement ce que la rotation doit éviter.

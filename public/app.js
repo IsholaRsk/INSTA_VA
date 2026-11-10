@@ -861,6 +861,84 @@ async function removeProxy() {
   finally { button.disabled = false; }
 }
 
+
+/* ------------------------------- diagnostic ------------------------------- */
+
+async function loadDiagnostic() {
+  const list = $('#diagnostic-list');
+  const badge = $('#diagnostic-badge');
+  try {
+    const data = await apiRequest('/api/diagnostic');
+    const { fingerprint = {}, proxies = {}, rules = {}, sessions = 0 } = data;
+    const rows = [];
+
+    // 1. IP et réseau — le critère qui passe avant tout le reste.
+    const ipGood = proxies.priority;
+    rows.push({
+      step: '1', tone: ipGood ? 'good' : 'bad',
+      title: 'IP et réseau (ASN)',
+      text: proxies.total
+        ? `${proxies.residential} résidentiel(s), ${proxies.datacenter} datacenter, ${proxies.unknown} non testé(s). ${rules.ip || ''}`
+        : 'Aucun proxy importé : le site voit directement l’IP du VPS, qui appartient à un hébergeur.',
+    });
+
+    // 2. Réputation — subie, jamais contrôlable depuis l'application.
+    rows.push({
+      step: '2', tone: 'info',
+      title: 'Réputation de l’IP',
+      text: 'Dépend de l’historique de l’adresse chez Cloudflare, y compris l’usage qu’en ont fait d’autres avant toi. '
+        + 'Rien dans l’application ne peut la modifier : c’est la raison de préférer des IP résidentielles peu partagées.',
+    });
+
+    // 3. Empreinte TLS et 4. en-têtes — mesurées, corrigeables.
+    rows.push({
+      step: '3', tone: fingerprint.ok ? 'good' : 'bad',
+      title: 'Empreinte TLS et en-têtes',
+      text: fingerprint.ok
+        ? `Cohérente : User-Agent Chrome/${fingerprint.uaVersion || '?'} aligné sur les client hints, profil de bureau, marqueurs d’automatisation neutralisés. `
+          + (fingerprint.note || '')
+        : `Incohérence détectée : ${(fingerprint.issues || []).join(' ')}`,
+    });
+
+    // 5. Cookies et comportement.
+    rows.push({
+      step: '5', tone: sessions ? 'good' : 'info',
+      title: 'Cookies et comportement',
+      text: `${sessions} cible(s) avec cookies conservés. ${rules.cookies || ''} `
+        + 'Les cookies d’une visite précédente évitent de repasser un contrôle déjà résolu, et un rythme régulier pèse moins qu’une rafale.',
+    });
+
+    list.replaceChildren();
+    rows.forEach((row) => {
+      const item = node('div', `diagnostic-row is-${row.tone}`);
+      item.append(node('span', 'diagnostic-step', row.step));
+      const body = node('div', '');
+      body.append(node('strong', '', row.title), node('p', '', row.text));
+      item.append(body);
+      list.append(item);
+    });
+
+    const blocking = rows.filter((row) => row.tone === 'bad').length;
+    badge.textContent = blocking ? `${blocking} point(s) bloquant(s)` : 'Aucun point bloquant';
+    badge.className = blocking ? 'status-badge status-warning' : 'status-badge status-success';
+    $('#clear-sessions').classList.toggle('hidden', !sessions);
+  } catch (error) {
+    setFormMessage($('#diagnostic-message'), displayError(error), 'error');
+  }
+}
+
+async function clearSessions() {
+  const button = $('#clear-sessions');
+  button.disabled = true;
+  try {
+    const data = await apiRequest('/api/sessions?id=all', { method: 'DELETE' });
+    setFormMessage($('#diagnostic-message'), data.message || 'Sessions effacées.', 'success');
+    await loadDiagnostic();
+  } catch (error) {
+    setFormMessage($('#diagnostic-message'), displayError(error), 'error');
+  } finally { button.disabled = false; }
+}
+
 function showNotice(message, isError = false) {
   const notice = $('#notice');
   notice.textContent = message;
@@ -870,7 +948,7 @@ function showNotice(message, isError = false) {
 
 async function enterWorkspace() {
   showWorkspace();
-  await Promise.all([loadTargets(), loadProxyStatus(), loadActivity()]);
+  await Promise.all([loadTargets(), loadProxyStatus(), loadActivity(), loadDiagnostic()]);
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = setInterval(() => {
     if (document.visibilityState === 'visible') loadActivity();
@@ -900,6 +978,7 @@ async function boot() {
   $('#proxy-form').addEventListener('submit', saveProxy);
   $('#remove-proxy').addEventListener('click', removeProxy);
   $('#test-proxies').addEventListener('click', () => testProxies(null, $('#test-proxies')));
+  $('#clear-sessions').addEventListener('click', clearSessions);
   $('#proxy-enabled').addEventListener('change', saveProxyState);
   $('#proxy-rotation').addEventListener('change', saveProxyState);
 

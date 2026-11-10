@@ -11,7 +11,9 @@
 // Options de lancement : retirent les signaux les plus voyants.
 export const STEALTH_ARGS = [
   '--disable-blink-features=AutomationControlled',
-  '--disable-features=IsolateOrigins,site-per-process',
+  // `--disable-features=IsolateOrigins,site-per-process` était présent : c'est
+  // un argument de test qui désactive les protections par site de Chrome, donc
+  // un signal d'automatisation repérable. Retiré.
   '--disable-infobars',
   '--no-service-autorun',
   '--password-store=basic',
@@ -80,4 +82,72 @@ export function contextProfile(browserVersion, platform = 'linux') {
     colorScheme: 'light',
     extraHTTPHeaders: clientHints(browserVersion, platform),
   };
+}
+
+/**
+ * Diagnostic de l'empreinte présentée au site (règle 3 côté page).
+ *
+ * Le vrai critère TLS (JA3/JA4) est produit par le moteur Chromium lui-même :
+ * piloter un vrai Chrome plutôt qu'une bibliothèque HTTP est déjà la bonne
+ * réponse, et aucun réglage applicatif ne peut l'améliorer. Ce qui reste
+ * vérifiable et corrigeable, c'est la cohérence de la surface exposée à la
+ * page : c'est ce que ce diagnostic mesure et affiche.
+ */
+export function describeFingerprint({ userAgent = '', hints = {}, webdriver = true, viewport = {}, locales = [], timezone = '' } = {}) {
+  const issues = [];
+
+  // La version annoncée doit exister dans l'User-Agent ET dans les client hints.
+  const uaVersion = /Chrome\/(\d+)\./.exec(String(userAgent))?.[1] || null;
+  const hintVersion = /"Google Chrome";v="(\d+)"/.exec(String(hints?.['sec-ch-ua'] || ''))?.[1] || null;
+  if (!uaVersion) issues.push('User-Agent sans version Chrome reconnaissable.');
+  if (uaVersion && hintVersion && uaVersion !== hintVersion) {
+    issues.push(`Version incohérente : User-Agent Chrome/${uaVersion}, client hints Chrome/${hintVersion}.`);
+  }
+  if (uaVersion && !hintVersion) issues.push('Client hints absents alors que le User-Agent annonce Chrome.');
+  // Un User-Agent Windows avec des hints Linux (ou l'inverse) est un signal fort.
+  const uaPlatform = /Windows NT/.test(String(userAgent)) ? 'Windows' : /X11; Linux/.test(String(userAgent)) ? 'Linux' : null;
+  const hintPlatform = String(hints?.['sec-ch-ua-platform'] || '').replace(/"/g, '') || null;
+  if (uaPlatform && hintPlatform && uaPlatform !== hintPlatform) {
+    issues.push(`Système incohérent : User-Agent ${uaPlatform}, client hints ${hintPlatform}.`);
+  }
+  if (webdriver === true) issues.push('navigator.webdriver est encore à true.');
+  if (!viewport?.width || !viewport?.height) issues.push('Viewport non défini.');
+  if (!locales?.length) issues.push('Aucune langue déclarée.');
+  if (!timezone) issues.push('Aucun fuseau horaire déclaré.');
+
+  return {
+    ok: issues.length === 0,
+    userAgent: String(userAgent).slice(0, 160),
+    uaVersion,
+    hintVersion,
+    platform: uaPlatform,
+    issues,
+    // Ce que ce diagnostic ne peut pas mesurer, dit franchement.
+    note: 'L’empreinte TLS (JA3/JA4) et HTTP/2 est produite par le moteur Chromium lui-même ; '
+      + 'seul un vrai navigateur la produit correctement, ce qui est le cas ici.',
+  };
+}
+
+/** Construit le diagnostic à partir du profil réellement appliqué au contexte. */
+export function fingerprintFromProfile(profile = {}, webdriver = true) {
+  return describeFingerprint({
+    userAgent: profile.userAgent,
+    hints: profile.extraHTTPHeaders || {},
+    webdriver,
+    viewport: profile.viewport,
+    locales: profile.locale ? [profile.locale] : [],
+    timezone: profile.timezoneId,
+  });
+}
+
+/**
+ * Version de Chromium attendue, lue depuis le fichier d'inventaire de
+ * Playwright. Sert au diagnostic quand aucun navigateur n'est ouvert ; une
+ * lecture impossible retombe sur une version vide, ce qui sera signalé.
+ */
+export function engineVersionFrom(browsersJson, name = 'chromium') {
+  try {
+    const entry = (browsersJson?.browsers || []).find((item) => item.name === name);
+    return String(entry?.browserVersion || '');
+  } catch { return ''; }
 }

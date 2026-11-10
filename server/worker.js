@@ -130,6 +130,25 @@ export function createWorker({
       if (picked && picked.proxy) { proxy = picked.proxy; proxyId = picked.id; }
     } catch (error) { logger.warn(`Proxy ignoré pour ${target.pseudo} : ${error.message}`); }
 
+    // Cookies de la visite précédente sur cette cible : on revient comme un
+    // visiteur déjà venu, pas comme un nouveau à chaque fois (règle 5).
+    const previousSession = store.getTargetSession?.(visit.user_id, target.id) || null;
+    const storageState = previousSession?.storage || null;
+    const keepSession = (state) => {
+      try {
+        const cookies = Array.isArray(state?.cookies) ? state.cookies : [];
+        // On ne conserve que les cookies du site visé : garder ceux de tiers
+        // n'apporte rien et élargit inutilement ce qui est stocké.
+        const siteHost = (() => { try { return new URL(target.url).hostname; } catch { return ''; } })();
+        const relevant = cookies.filter((cookie) => {
+          const domain = String(cookie.domain || '').replace(/^\./, '');
+          return siteHost && (siteHost === domain || siteHost.endsWith(`.${domain}`));
+        });
+        if (!relevant.length) return;
+        store.saveTargetSession?.(visit.user_id, target.id, { cookies: relevant, origins: [] }, relevant.length);
+      } catch (error) { logger.warn(`Session non conservée pour ${target.pseudo} : ${error.message}`); }
+    };
+
     try {
       const browser = await getBrowser();
       let result;
@@ -141,6 +160,8 @@ export function createWorker({
           proxy,
           navigationTimeout: config.navigationTimeoutMs,
           challengeWaitMs: config.challengeWaitMs,
+          storageState,
+          onStorageState: keepSession,
         });
       } catch (error) {
         // Blocage anti-bot : sans proxy, on rejoue une fois via la liste de
@@ -165,6 +186,8 @@ export function createWorker({
           proxy,
           navigationTimeout: config.navigationTimeoutMs,
           challengeWaitMs: config.challengeWaitMs,
+          storageState,
+          onStorageState: keepSession,
         });
       }
       // Le proxy utilisé est crédité du cycle réussi.

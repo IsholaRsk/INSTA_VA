@@ -13,7 +13,7 @@ import path from 'node:path';
  *
  * La v2 remplace le proxy unique par une liste illimitée avec rotation.
  */
-const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const MIGRATION_V1 = `
 CREATE TABLE IF NOT EXISTS users (
@@ -149,6 +149,22 @@ CREATE TABLE IF NOT EXISTS proxy_state (
 );
 `;
 
+/**
+ * v3 : deux apports pour survivre aux contrôles de Cloudflare.
+ *  - proxies.ip_kind / asn / org : nature de l'IP de sortie, pour choisir un
+ *    proxy selon son réseau et non selon sa position dans la liste.
+ *  - target_sessions : cookies conservés par cible, pour arriver sur le site
+ *    comme un visiteur déjà venu (règle 5 : cookies et comportement).
+ */
+// Les colonnes sont ajoutées une à une après vérification (ALTER TABLE n'est
+// pas idempotent) ; la table, elle, est créée avec IF NOT EXISTS.
+
+function columnExists(db, table, column) {
+  try {
+    return db.prepare(`PRAGMA table_info(${table})`).all().some((row) => row.name === column);
+  } catch { return false; }
+}
+
 function tableExists(db, name) {
   const row = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
   return Boolean(row);
@@ -202,6 +218,29 @@ export function openDatabase(file, { log = () => {} } = {}) {
         }
         db.exec('DROP TABLE IF EXISTS proxy_settings');
       }
+      db.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
+        .run(String(SCHEMA_VERSION));
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+  if (current < 3) {
+    if (current >= 1) log('Migration v3 : nature des IP de proxy et sessions par cible');
+    db.exec('BEGIN');
+    try {
+      // ALTER TABLE n'est pas idempotent : on vérifie chaque colonne.
+      for (const [column, type] of [['ip_kind', 'TEXT'], ['asn', 'INTEGER'], ['org', 'TEXT'], ['ip_checked_at', 'TEXT']]) {
+        if (!columnExists(db, 'proxies', column)) db.exec(`ALTER TABLE proxies ADD COLUMN ${column} ${type}`);
+      }
+      db.exec(`CREATE TABLE IF NOT EXISTS target_sessions (
+        target_id TEXT PRIMARY KEY REFERENCES targets(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        storage TEXT NOT NULL,
+        cookie_count INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );`);
       db.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
         .run(String(SCHEMA_VERSION));
       db.exec('COMMIT');
