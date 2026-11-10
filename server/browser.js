@@ -276,6 +276,9 @@ export async function runCycle({
     await waitForRedirect(destination, popup ? 'about:blank' : beforeUrl);
     const finalUrl = destination.url();
     const title = await destination.title().catch(() => '');
+    // Preuve d'usage du proxy : l'IP vue par un service externe. Null si le
+    // service est injoignable — jamais bloquant.
+    const exitIp = await readExitIp(destination);
     return {
       initial_url: url,
       final_url: finalUrl,
@@ -284,6 +287,7 @@ export async function runCycle({
       click_kind: choice.kind,
       click_href: choice.href || null,
       redirected: true,
+      exit_ip: exitIp,
       completed_at: new Date().toISOString(),
     };
   } finally {
@@ -329,6 +333,31 @@ async function settleChallenge(page, { userUrl = '', waitMs = 12000 } = {}) {
     await page.waitForTimeout(700);
   }
   return last?.challenge ? { ...last.challenge, debug: challengeDebugInfo(last) } : null;
+}
+
+/**
+ * Lit l'IP publique vue par le site, telle que le navigateur la présente.
+ *
+ * C'est la seule preuve que le proxy sert réellement : une erreur de
+ * configuration peut laisser le navigateur sortir directement par l'IP du VPS
+ * sans qu'aucune erreur ne soit levée. La requête passe par la page (donc par
+ * le contexte, donc par le proxy) et échoue en silence si le service est
+ * injoignable — ce n'est jamais bloquant pour le cycle.
+ */
+const IP_ECHO_ENDPOINT = 'https://api.ipify.org/?format=json';
+
+async function readExitIp(page) {
+  try {
+    const result = await page.evaluate(async (endpoint) => {
+      try {
+        const response = await fetch(endpoint, { cache: 'no-store', credentials: 'omit' });
+        if (!response.ok) return null;
+        const data = await response.json();
+        return typeof data?.ip === 'string' ? data.ip : null;
+      } catch { return null; }
+    }, IP_ECHO_ENDPOINT);
+    return result || null;
+  } catch { return null; }
 }
 
 /** Photographie le titre, l'URL et les marqueurs DOM de la page courante. */

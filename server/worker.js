@@ -172,7 +172,10 @@ export function createWorker({
       store.finishVisit(visit.id, 'success', result);
       // Le clic réussi alimente le journal quotidien (quota de 100 clics/jour).
       store.addClick(visit.user_id, target.id, dayKeyIn(config.timeZone), 1);
-      logger.info(`✓ ${target.pseudo} — ${result.click_kind} « ${result.click_label} » → ${String(result.final_url).slice(0, 90)}`);
+      // L'IP de sortie est journalisée : c'est la preuve visible que le proxy
+      // choisi sert vraiment, et non l'IP du VPS.
+      const via = proxy ? `via ${proxy.host}${result.exit_ip ? ` (IP ${result.exit_ip})` : ''}` : 'en direct (IP du VPS)';
+      logger.info(`✓ ${target.pseudo} — ${result.click_kind} « ${result.click_label} » → ${String(result.final_url).slice(0, 90)} · ${via}`);
     } catch (error) {
       const message = friendlyCycleError(error);
       store.finishVisit(visit.id, 'failed', { message });

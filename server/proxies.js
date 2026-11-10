@@ -1,3 +1,4 @@
+import { connect as netConnect } from 'node:net';
 import '../extension/bot-utils.js';
 import { decryptSecret, encryptSecret, maskValue } from './crypto.js';
 import { validateProxyConfiguration } from './net-safety.js';
@@ -110,8 +111,11 @@ export function assertProxyLimit(count) {
 /**
  * Teste un proxy en récupérant l'IP de sortie observée.
  *
- * Passe par un tunnel CONNECT natif (`node:http`) puis une requête TLS directe :
- * aucune dépendance supplémentaire, et l'appel échoue proprement (401/407/refus)
+ * HTTP/HTTPS : tunnel `CONNECT` natif puis TLS direct.
+ * SOCKS5 : vraie poignée de main (RFC 1928) — le protocole n'a rien à voir avec
+ * HTTP, envoyer un `CONNECT` à un serveur SOCKS5 le fait échouer à coup sûr.
+ *
+ * Aucune dépendance supplémentaire, et l'appel échoue proprement (407, refus)
  * si le proxy ou les identifiants ne fonctionnent pas.
  */
 // Les erreurs système remontent en anglais (`read ECONNRESET`) : on les traduit pour l'interface.
@@ -128,26 +132,181 @@ export function friendlyProxyError(error) {
   return message.slice(0, 140) || 'Le proxy n’a pas répondu.';
 }
 
-export async function probeProxy(entry, timeoutMs = 8000) {
-  const http = await import('node:http');
-  const https = await import('node:https');
-  const net = await import('node:net');
-  const tls = await import('node:tls');
+// Deux services d'écho d'IP : si le premier est bloqué par le réseau du VPS ou
+// tombe, le second prend le relais. Un échec des deux reste un échec du proxy.
+const PROBE_TARGETS = [
+  { host: 'api.ipify.org', port: 443, path: '/?format=json', pick: (data) => data?.ip },
+  { host: 'ipinfo.io', port: 443, path: '/json', pick: (data) => data?.ip },
+];
 
-  const target = { host: 'api.ipify.org', port: 443, path: '/?format=json' };
+/** Requête HTTPS à travers un flux déjà tunnelisé, pour lire l'IP de sortie. */
+async function readExitIpFrom(socket, target, timeoutMs) {
+  const https = await import('node:https');
+  const tls = await import('node:tls');
+  return new Promise((resolve, reject) => {
+    const secure = tls.connect({ socket, servername: target.host, rejectUnauthorized: false }, () => {
+      const request = https.request({
+        host: target.host, path: target.path, method: 'GET', socket: secure,
+        servername: target.host,
+        headers: { host: target.host, accept: 'application/json', connection: 'close' },
+      }, (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          secure.destroy();
+          if (res.statusCode !== 200) return reject(new Error(`Réponse ${res.statusCode} du service de test.`));
+          try {
+            const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            const ip = target.pick(data);
+            if (!ip) return reject(new Error('IP de sortie illisible.'));
+            resolve({ ip });
+          } catch { reject(new Error('Réponse illisible du service de test.')); }
+        });
+      });
+      request.on('error', (error) => { secure.destroy(); reject(new Error(friendlyProxyError(error))); });
+      request.end();
+    });
+    secure.setTimeout(timeoutMs, () => { secure.destroy(); reject(new Error('Le proxy ne répond pas (délai dépassé).')); });
+    secure.on('error', (error) => reject(new Error(friendlyProxyError(error))));
+  });
+}
+
+/**
+ * Lit l'IP de sortie sur l'un des services d'écho. Un flux tunnelisé ne peut
+ * servir qu'une fois : on redemande un tunnel neuf pour chaque tentative.
+ */
+async function readExitIpWithFallback(openTunnel, timeoutMs) {
+  let lastError = null;
+  for (const target of PROBE_TARGETS) {
+    let socket = null;
+    try {
+      socket = await openTunnel(target);
+      return await readExitIpFrom(socket, target, timeoutMs);
+    } catch (error) {
+      lastError = error;
+    } finally {
+      if (socket) socket.destroy();
+    }
+  }
+  throw lastError || new Error('Le proxy n’a pas répondu.');
+}
+
+/** Poignée de main SOCKS5 (RFC 1928) avec authentification par mot de passe. */
+function openSocks5Tunnel(entry, target, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const socket = netConnect({ host: entry.host, port: entry.port });
+    let stage = 'greeting';
+    let buffer = Buffer.alloc(0);
+
+    const fail = (message) => { socket.destroy(); reject(new Error(message)); };
+    socket.setTimeout(timeoutMs, () => fail('Le proxy ne répond pas (délai dépassé).'));
+    socket.on('error', (error) => reject(new Error(friendlyProxyError(error))));
+
+    // Le serveur peut répondre en plusieurs paquets : on accumule et on découpe.
+    const consume = (bytes) => { buffer = Buffer.concat([buffer, bytes]); };
+
+    const step = () => {
+      if (stage === 'greeting') {
+        if (buffer.length < 2) return;
+        if (buffer[0] !== 0x05) return fail('Ce n’est pas un serveur SOCKS5 (version inattendue).');
+        const method = buffer[1];
+        buffer = buffer.subarray(2);
+        if (method === 0x02) {
+          // Nom d'utilisateur / mot de passe (RFC 1929).
+          const user = Buffer.from(String(entry.username || ''), 'utf8');
+          const pass = Buffer.from(String(entry.password || ''), 'utf8');
+          const packet = Buffer.concat([
+            Buffer.from([0x01, user.length]), user,
+            Buffer.from([pass.length]), pass,
+          ]);
+          stage = 'auth';
+          socket.write(packet);
+        } else if (method === 0x00) {
+          stage = 'connect';
+          sendConnect();
+        } else if (method === 0xff) {
+          return fail('Identifiants refusés par le proxy SOCKS5 (aucune méthode acceptée).');
+        } else {
+          return fail(`Le proxy SOCKS5 exige une méthode d’authentification non gérée (0x${method.toString(16)}).`);
+        }
+        return step();
+      }
+
+      if (stage === 'auth') {
+        if (buffer.length < 2) return;
+        const status = buffer[1];
+        buffer = buffer.subarray(2);
+        if (status !== 0x00) return fail('Identifiants refusés par le proxy SOCKS5.');
+        stage = 'connect';
+        sendConnect();
+        return step();
+      }
+
+      if (stage === 'connect') {
+        if (buffer.length < 5) return;
+        if (buffer[0] !== 0x05) return fail('Réponse SOCKS5 invalide.');
+        const reply = buffer[1];
+        if (reply !== 0x00) {
+          const reasons = {
+            0x01: 'erreur générale du proxy SOCKS5.',
+            0x02: 'connexion non autorisée par le proxy SOCKS5.',
+            0x03: 'réseau injoignable depuis le proxy SOCKS5.',
+            0x04: 'hôte injoignable depuis le proxy SOCKS5.',
+            0x05: 'connexion refusée par le destinataire.',
+            0x06: 'TTL expiré.',
+            0x07: 'commande non supportée par le proxy SOCKS5.',
+            0x08: 'type d’adresse non supporté par le proxy SOCKS5.',
+          };
+          return fail(`Le proxy SOCKS5 a refusé la connexion : ${reasons[reply] || `code ${reply}`}`);
+        }
+        // Adresse de liaison à ignorer, de longueur variable.
+        const addressType = buffer[3];
+        const addressLength = addressType === 0x01 ? 4 : addressType === 0x04 ? 16 : buffer[4] + 1;
+        const total = 4 + addressLength + 2;
+        if (buffer.length < total) return;
+        buffer = buffer.subarray(total);
+        socket.removeAllListeners('data');
+        socket.setTimeout(0);
+        resolve(socket);
+        return;
+      }
+    };
+
+    function sendConnect() {
+      const host = Buffer.from(target.host, 'utf8');
+      socket.write(Buffer.concat([
+        Buffer.from([0x05, 0x01, 0x00, 0x03, host.length]), host,
+        Buffer.from([(target.port >> 8) & 0xff, target.port & 0xff]),
+      ]));
+    }
+
+    socket.on('data', (bytes) => {
+      consume(bytes);
+      try { step(); } catch (error) { fail(error.message); }
+    });
+    socket.on('connect', () => {
+      // Aucune authentification préférée, mais on accepte aussi identifiant/mot de passe.
+      const methods = entry.username ? [0x00, 0x02] : [0x00];
+      socket.write(Buffer.from([0x05, methods.length, ...methods]));
+    });
+  });
+}
+
+export async function probeProxy(entry, timeoutMs = 8000) {
+  const scheme = String(entry?.scheme || 'http').toLowerCase();
+  if (scheme === 'socks5' || scheme === 'socks') {
+    return readExitIpWithFallback(
+      (target) => openSocks5Tunnel(entry, target, timeoutMs),
+      timeoutMs,
+    );
+  }
+
+  const http = await import('node:http');
   const auth = 'Basic ' + Buffer.from(`${entry.username}:${entry.password}`).toString('base64');
 
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (fn, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      fn(value);
-    };
-    const timer = setTimeout(() => finish(reject, new Error('Délai dépassé : le proxy ne répond pas.')), timeoutMs);
-
-    const connectRequest = http.request({
+  // Tunnel HTTP CONNECT vers la cible demandée (une par tentative de repli).
+  const openTunnel = (target) => new Promise((resolve, reject) => {
+    const request = http.request({
       host: entry.host,
       port: entry.port,
       method: 'CONNECT',
@@ -155,45 +314,21 @@ export async function probeProxy(entry, timeoutMs = 8000) {
       headers: { host: `${target.host}:${target.port}`, 'proxy-authorization': auth },
       timeout: timeoutMs,
     });
-
-    connectRequest.on('connect', (response, socket) => {
+    request.on('connect', (response, socket) => {
       if (response.statusCode !== 200) {
         socket.destroy();
         const detail = response.statusCode === 407
           ? 'Identifiants refusés par le proxy (407).'
           : `Le proxy a refusé le tunnel (HTTP ${response.statusCode}).`;
-        finish(reject, new Error(detail));
+        reject(new Error(detail));
         return;
       }
-      // Tunnel établi : on négocie TLS à travers, comme un vrai navigateur.
-      const secure = tls.connect({ socket, servername: target.host, rejectUnauthorized: false }, () => {
-        const request = https.request({
-          host: target.host, path: target.path, method: 'GET', socket: secure,
-          servername: target.host,
-          headers: { host: target.host, accept: 'application/json', connection: 'close' },
-        }, (res) => {
-          const chunks = [];
-          res.on('data', (chunk) => chunks.push(chunk));
-          res.on('end', () => {
-            secure.destroy();
-            if (res.statusCode !== 200) return finish(reject, new Error(`Réponse ${res.statusCode} du service de test.`));
-            try {
-              const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-              if (!data?.ip) return finish(reject, new Error('IP de sortie illisible.'));
-              finish(resolve, { ip: data.ip });
-            } catch { finish(reject, new Error('Réponse illisible du service de test.')); }
-          });
-        });
-        request.on('error', (error) => { secure.destroy(); finish(reject, new Error(friendlyProxyError(error))); });
-        request.end();
-      });
-      secure.on('error', (error) => finish(reject, new Error(friendlyProxyError(error))));
+      resolve(socket);
     });
-
-    connectRequest.on('error', (error) => {
-      finish(reject, new Error(friendlyProxyError(error)));
-    });
-    connectRequest.on('timeout', () => { connectRequest.destroy(); finish(reject, new Error('Le proxy ne répond pas (délai dépassé).')); });
-    connectRequest.end();
+    request.on('error', (error) => reject(new Error(friendlyProxyError(error))));
+    request.on('timeout', () => { request.destroy(); reject(new Error('Le proxy ne répond pas (délai dépassé).')); });
+    request.end();
   });
+
+  return readExitIpWithFallback(openTunnel, timeoutMs);
 }
