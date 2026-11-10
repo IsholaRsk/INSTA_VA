@@ -97,6 +97,50 @@ test('import fichier : un fichier UTF-16 avec BOM et CRLF est décodé sans cara
     const normalized = decoded.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').trim();
     assert.deepEqual(normalized.split('\n'), lines);
     assert.equal(normalized.includes('\u0000'), false, 'aucun octet nul (signe d’un mauvais décodage)');
+    // Laisse les micro-tâches de rendu se terminer avant de rendre la main.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } finally {
+    globalThis.window = previous.window;
+    globalThis.document = previous.document;
+  }
+});
+
+test('activité : l’IP de sortie est visible dans l’application, pas seulement dans les logs', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const { JSDOM } = await import('jsdom');
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  const dom = new JSDOM(html, { url: 'http://127.0.0.1/' });
+  const previous = { window: globalThis.window, document: globalThis.document };
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  try {
+    const source = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+    const api = await new Function(`return (async () => { ${source}
+      return { renderActivity };
+    })()`)();
+
+    // Cycle passé par un proxy.
+    api.renderActivity([{
+      id: 'v1', status: 'success', pseudo: 'Cible', visit_number: 1,
+      completed_at: new Date().toISOString(),
+      result: { click_kind: 'bouton', click_label: 'Voir', final_url: 'https://exemple.fr/x',
+        exit_ip: '51.15.10.20', proxy_host: '141.94.255.57' },
+    }]);
+    const viaProxy = dom.window.document.querySelector('.activity-exit');
+    assert.ok(viaProxy, 'la ligne d’IP de sortie doit être affichée');
+    assert.match(viaProxy.textContent, /141\.94\.255\.57/);
+    assert.match(viaProxy.textContent, /51\.15\.10\.20/);
+
+    // Cycle sorti directement : c'est le signal d'alerte.
+    api.renderActivity([{
+      id: 'v2', status: 'success', pseudo: 'Cible', visit_number: 2,
+      completed_at: new Date().toISOString(),
+      result: { click_kind: 'bouton', final_url: 'https://exemple.fr/y', exit_ip: '203.0.113.7', proxy_host: null },
+    }]);
+    const direct = dom.window.document.querySelector('.activity-exit');
+    assert.match(direct.textContent, /directe|VPS/);
+    // Laisse les micro-tâches de rendu se terminer avant de rendre la main.
+    await new Promise((resolve) => setTimeout(resolve, 50));
   } finally {
     globalThis.window = previous.window;
     globalThis.document = previous.document;

@@ -370,7 +370,11 @@ L'import affiche le compte rendu : ajoutés, doublons ignorés (un proxy déjà 
 Ensuite :
 
 - **Rotation** — `dans l'ordre` prend les proxys un par un dans l'ordre de la liste et reboucle ; `au hasard` en tire un à chaque cycle, jamais deux fois de suite le même.
-- **Tester les proxys actifs** — vérifie chaque proxy (jusqu'à 25 à la fois) et affiche ceux qui répondent, leur latence et l'IP de sortie observée. Les proxys morts ou mal identifiés sont visibles en un clic.
+- **Tester les proxys actifs** — vérifie chaque proxy (jusqu'à 25 à la fois) et affiche ceux qui répondent, leur latence et l'IP de sortie observée. Les proxys morts ou mal identifiés sont visibles en un clic. Les proxys **HTTP/HTTPS** sont testés par tunnel `CONNECT`, les **SOCKS5** par une vraie poignée de main SOCKS5 — les deux protocoles n'ont rien en commun, tester un SOCKS5 comme un HTTP le déclarait toujours en échec.
+
+Chaque cycle réussi affiche l'**IP de sortie réellement observée** dans l'onglet *Activité récente* : « Sortie par 141.94.255.57 — IP 51.15.x.x » si le proxy sert, « Sortie directe par l'IP du VPS — x.x.x.x » sinon. C'est la seule preuve fiable que le proxy est actif — une erreur de configuration peut laisser le navigateur sortir directement sans lever d'erreur.
+
+Le test interroge deux services d'écho d'IP : si le premier est bloqué par le réseau du VPS ou tombe, le second prend le relais. Ces services ne servent qu'au bouton **Tester** : les cycles du bot ne dépendent jamais d'eux.
 - **Décocher *Utiliser la rotation*** — revient à l'IP du VPS sans supprimer la liste.
 - Un proxy qui échoue trois fois de suite est **désactivé automatiquement** ; le bouton **Supprimer les proxys désactivés** nettoie la liste d'un coup.
 

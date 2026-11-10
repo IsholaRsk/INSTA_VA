@@ -449,6 +449,15 @@ function renderActivity(visits) {
       : visit.status === 'success'
         ? `Clic ${visit.result?.click_kind || 'effectué'}${visit.result?.click_label ? ` « ${visit.result.click_label} »` : ''}${visit.result?.title ? ` · ${visit.result.title}` : ''}`
         : visit.status === 'running' ? 'Le navigateur du VPS exécute le cycle.' : '');
+    // IP de sortie : la seule preuve visible que le proxy a servi. Sans elle,
+    // impossible de distinguer « le site refuse » de « le proxy est ignoré ».
+    const exitIp = visit.result?.exit_ip;
+    if (exitIp) {
+      const usedProxy = Boolean(visit.result?.proxy_host);
+      body.append(node('p', 'activity-exit', usedProxy
+        ? `Sortie par ${visit.result.proxy_host} — IP ${exitIp}`
+        : `Sortie directe par l’IP du VPS — ${exitIp}`));
+    }
     if (message) body.append(node('p', '', message));
     const finalUrl = safeHttpUrl(visit.result?.final_url);
     if (finalUrl) {
