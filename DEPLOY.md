@@ -395,6 +395,25 @@ Sur un refus définitif :
 
 Aucun réglage ne fait passer un 1020 : c'est une décision du site, prise avant tout chargement de page. Seul un proxy résidentiel — et parfois rien — change le résultat.
 
+### Sur quels critères Cloudflare te refuse
+
+L'erreur 1020 n'est pas une loterie : c'est une **règle écrite par le propriétaire du site**. La requête franchit plusieurs contrôles, dans un ordre précis, et le premier qui échoue suffit :
+
+| Ordre | Contrôle | Ce qui est examiné |
+|---|---|---|
+| 1 | **IP et ASN** | L'adresse de sortie et le réseau qui la possède. Une IP d'OVH, Hetzner, Amazon ou DigitalOcean est identifiée comme un serveur, pas comme un abonné. |
+| 2 | **Réputation de l'IP** | L'historique de cette adresse chez Cloudflare : si elle a servi à du spam ou du scraping, son score de menace est mauvais — même si toi tu l'utilises proprement. |
+| 3 | **Empreinte TLS (JA3/JA4)** | La négociation chiffrée doit ressembler à celle d'un vrai Chrome. C'est vérifié **avant** le moindre en-tête HTTP. |
+| 4 | **En-têtes et empreinte navigateur** | User-Agent, *client hints*, cohérence avec le système annoncé, `navigator.webdriver`. Le bot les aligne sur le moteur réel. |
+| 5 | **Cookies et comportement** | Cookie de clearance, rythme des requêtes, parcours de navigation. |
+
+Deux conséquences concrètes :
+
+- **Le critère 1 passe avant tout le reste.** Une IP d'hébergeur est refusée quelle que soit la qualité de ton navigateur. Soigner l'empreinte (critères 3 et 4) est utile, mais ne compense jamais une IP mal classée.
+- **Une 1020 est déterministe.** Ce n'est pas un score qui monte et descend : la règle s'applique ou non. Attendre, réessayer ou changer l'ordre des clics n'y change rien.
+
+**Le bouton Tester te donne désormais ce verdict.** Après un test, chaque proxy affiche la nature de son IP de sortie : `Datacenter · OVH (AS16276)`, `Résidentiel · Free SAS`, ou `Nature d’IP inconnue`. Le compte rendu global indique combien de tes proxys sortent par un hébergeur — s'ils le font tous, la question n'est plus « combien de proxys » mais « quel type de proxys ».
+
 ### Si le blocage persiste
 
 La cause dominante n'est alors plus le navigateur mais **la réputation de l'IP**. Une IP de datacenter (OVH, Hetzner, Scaleway…) est massivement utilisée par des robots : Cloudflare la traite en conséquence. Dans ce cas :

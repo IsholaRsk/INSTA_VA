@@ -146,3 +146,45 @@ test('activité : l’IP de sortie est visible dans l’application, pas seuleme
     globalThis.document = previous.document;
   }
 });
+
+test('test des proxys : la nature de l’IP de sortie est affichée, datacenter signalé', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const { JSDOM } = await import('jsdom');
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  const dom = new JSDOM(html, { url: 'http://127.0.0.1/' });
+  const previous = { window: globalThis.window, document: globalThis.document };
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  try {
+    const source = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+    const api = await new Function(`return (async () => { ${source}
+      return { renderProxies, setRecords: (r) => { proxyRecords = r; }, setState: (s) => { proxyState = s; },
+        setResults: (m) => { proxyTestResults = m; } };
+    })()`)();
+
+    api.setRecords([
+      { id: 'p1', host: 'proxy1.exemple.fr', port: 8080, scheme: 'http', username: 'id••', enabled: true,
+        cycles: 0, successes: 0, failures: 0, consecutive_failures: 0, last_error: null, last_used_at: null },
+    ]);
+    api.setState({ enabled: true, rotation: 'order', cursor: 0, disableAfter: 3 });
+    api.setResults(new Map([['p1', { id: 'p1', ok: true, exitIp: '51.15.10.20', ipKind: 'datacenter', asn: 16276, provider: 'OVH' }]]));
+    api.renderProxies();
+
+    const tags = [...dom.window.document.querySelectorAll('.proxy-tag')].map((tag) => tag.textContent);
+    assert.ok(tags.some((text) => /Datacenter/.test(text)), `nature affichée : ${tags.join(' | ')}`);
+    assert.ok(tags.some((text) => /OVH/.test(text)), 'fournisseur affiché');
+    assert.ok(tags.some((text) => /AS16276/.test(text)), 'ASN affiché');
+    assert.ok(tags.some((text) => /51\.15\.10\.20/.test(text)), 'IP de sortie affichée');
+
+    // Une IP résidentielle ne doit pas être signalée comme un problème.
+    api.setResults(new Map([['p1', { id: 'p1', ok: true, exitIp: '88.120.1.1', ipKind: 'residential', org: 'Free SAS' }]]));
+    api.renderProxies();
+    const after = [...dom.window.document.querySelectorAll('.proxy-tag')].map((tag) => tag.textContent);
+    assert.ok(after.some((text) => /Résidentiel/.test(text)), 'résidentiel reconnu');
+    assert.ok(!after.some((text) => /Datacenter/.test(text)), 'plus de mention datacenter');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } finally {
+    globalThis.window = previous.window;
+    globalThis.document = previous.document;
+  }
+});

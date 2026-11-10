@@ -537,6 +537,8 @@ async function startRun() {
 
 const proxyList = $('#proxy-list');
 let proxyRecords = [];
+// Résultats du dernier test : nature de l'IP de sortie par proxy.
+let proxyTestResults = new Map();
 let proxyState = null;
 let proxyTesting = false;
 
@@ -604,6 +606,17 @@ function renderProxies() {
     else if (proxy.consecutive_failures) tags.append(node('span', 'proxy-tag is-warn', `${proxy.consecutive_failures} échec(s) de suite`));
     const rate = proxyPercent(proxy);
     if (rate !== null) tags.append(node('span', 'proxy-tag', `${rate}% de réussite · ${proxy.cycles} cycle(s)`));
+    // Nature de l'IP de sortie, connue après le bouton Tester.
+    const tested = proxyTestResults.get(proxy.id);
+    if (tested?.ok && tested.ipKind) {
+      const labels = {
+        datacenter: `Datacenter${tested.provider ? ` · ${tested.provider}` : ''}${tested.asn ? ` (AS${tested.asn})` : ''}`,
+        residential: `Résidentiel${tested.org ? ` · ${tested.org}` : ''}`,
+        unknown: 'Nature d’IP inconnue',
+      };
+      tags.append(node('span', `proxy-tag is-${tested.ipKind === 'datacenter' ? 'warn' : 'good'}`, labels[tested.ipKind] || labels.unknown));
+      if (tested.exitIp) tags.append(node('span', 'proxy-tag is-muted', `IP ${tested.exitIp}`));
+    }
     tags.append(node('span', 'proxy-tag is-muted', formatRelative(proxy.last_used_at)));
     main.append(title, tags);
     if (proxy.last_error) main.append(node('p', 'proxy-error', `Dernière erreur : ${proxy.last_error}`));
@@ -785,12 +798,30 @@ async function testProxies(ids, button) {
       body: JSON.stringify(ids && ids.length ? { ids } : {}),
     });
     const results = data.results || [];
+    results.forEach((item) => proxyTestResults.set(item.id, item));
     const ok = results.filter((item) => item.ok).length;
     const failures = results.filter((item) => !item.ok).slice(0, 3)
       .map((item) => `${item.host}:${item.port} (${item.message})`).join(' ; ');
+
+    // Le point décisif : combien de ces proxys sortent par un hébergeur ?
+    const reachable = results.filter((item) => item.ok);
+    const datacenter = reachable.filter((item) => item.ipKind === 'datacenter').length;
+    const residential = reachable.filter((item) => item.ipKind === 'residential').length;
+    const unknown = reachable.filter((item) => item.ipKind === 'unknown').length;
+    let nature = '';
+    if (reachable.length) {
+      const parts = [];
+      if (datacenter) parts.push(`${datacenter} datacenter`);
+      if (residential) parts.push(`${residential} résidentiel(s)`);
+      if (unknown) parts.push(`${unknown} indéterminé(s)`);
+      nature = ` Nature des IP de sortie : ${parts.join(', ')}.`;
+      if (datacenter && !residential) {
+        nature += ' Tous sortent par un hébergeur : c’est exactement ce que Cloudflare refuse en premier.';
+      }
+    }
     setFormMessage(
       $('#proxy-message'),
-      `${ok} proxy(s) sur ${results.length} répondent.${failures ? ` Échecs : ${failures}.` : ''}`,
+      `${ok} proxy(s) sur ${results.length} répondent.${failures ? ` Échecs : ${failures}.` : ''}${nature}`,
       ok === results.length ? 'success' : 'error',
     );
     await loadProxyStatus();

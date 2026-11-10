@@ -9,6 +9,7 @@ import {
   assertProxyLimit,
   attachSecretKey,
   decryptProxyRow,
+  describeExitIp,
   MAX_PROXY_IMPORT_BYTES,
   MAX_PROXY_IMPORT_CHARS,
   nextProxy,
@@ -404,9 +405,17 @@ export function createApp({
       const started = Date.now();
       try {
         const entry = decryptProxyRow(row, config.secretKey);
-        await probeProxy(entry, config.proxyTestTimeoutMs);
+        const probe = await probeProxy(entry, config.proxyTestTimeoutMs);
         store.recordProxyOutcome(row.id, { success: true, disableAfter: 999 });
-        results.push({ id: row.id, host: row.host, port: row.port, ok: true, latencyMs: Date.now() - started });
+        // Nature de l'IP de sortie : c'est elle qui décide du sort devant
+        // Cloudflare, bien plus que le fournisseur de proxy choisi.
+        const exit = await describeExitIp(probe.ip, { timeoutMs: Math.max(2500, config.proxyTestTimeoutMs) });
+        results.push({
+          id: row.id, host: row.host, port: row.port, ok: true,
+          latencyMs: Date.now() - started,
+          exitIp: exit.ip, ipKind: exit.kind, asn: exit.asn,
+          org: exit.org ? String(exit.org).slice(0, 80) : '', provider: exit.provider || '',
+        });
       } catch (error) {
         store.recordProxyOutcome(row.id, { success: false, error: error.message, disableAfter: 999 });
         results.push({ id: row.id, host: row.host, port: row.port, ok: false, message: String(error.message).slice(0, 160), latencyMs: Date.now() - started });
