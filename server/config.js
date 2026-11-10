@@ -81,6 +81,10 @@ export function loadConfig(env = process.env) {
     tickMs: readInteger(env.INSTAVA_TICK_MS, 5000, { min: 1000, max: 120000 }),
     maxConcurrentCycles: readInteger(env.INSTAVA_CONCURRENCY, 2, { min: 1, max: 8 }),
     navigationTimeoutMs: readInteger(env.INSTAVA_NAVIGATION_TIMEOUT_MS, 45000, { min: 5000, max: 120000 }),
+    // Temps laissé à un challenge Cloudflare pour se résoudre tout seul.
+    challengeWaitMs: readInteger(env.INSTAVA_CHALLENGE_WAIT_MS, 15000, { min: 0, max: 60000 }),
+    // Délai d'un test de proxy depuis l'interface (IP de sortie).
+    proxyTestTimeoutMs: readInteger(env.INSTAVA_PROXY_TEST_TIMEOUT_MS, 8000, { min: 1000, max: 30000 }),
     logLevel: String(env.INSTAVA_LOG_LEVEL || 'info').trim().toLowerCase(),
     version: String(env.INSTAVA_VERSION || '2.0.0'),
     trustProxy: readFlag(env.INSTAVA_TRUST_PROXY, true),

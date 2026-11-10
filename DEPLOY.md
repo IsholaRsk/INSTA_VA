@@ -219,7 +219,7 @@ sudo systemctl reload caddy
 | **Cibles enregistrées** | Chaque cible avec sa règle réelle (« 3 jour(s) · 300 clics au total · relevé depuis 50 pour tenir le minimum quotidien »). |
 | **Clics du jour** | Le journal quotidien : clics réellement effectués par cible, avec les 14 derniers jours en barres. C'est ce compteur qui garantit les 100 clics/jour. |
 | **Activité récente** | Chaque visite : réussi, en échec, en attente de confirmation, avec le libellé cliqué et l'URL finale. |
-| **Webshare** | Champ unique pour les identifiants proxy, chiffrés AES-256-GCM sur le VPS, jamais renvoyés au navigateur. |
+| **Proxys et rotation** | La liste de proxys (sans limite de nombre), avec par ligne son état, ses compteurs de cycles, son taux de réussite et un bouton **Tester**. Chaque cycle prend le proxy suivant : `dans l'ordre` parcourt la liste puis recommence, `au hasard` en tire un à chaque fois sans jamais répéter le précédent. Identifiants chiffrés AES-256-GCM sur le VPS, jamais renvoyés au navigateur. |
 
 **Le bot tourne 24 h/24** : fermer l'application ou éteindre le téléphone ne l'arrête pas. Seul le bouton **Arrêter** (dans l'activité) annule les visites en attente.
 
@@ -341,6 +341,55 @@ En Docker : arrête la pile, restaure dans le volume avec `docker compose cp`, r
 
 ---
 
+## 8 bis. Sites protégés par Cloudflare
+
+Beaucoup de sites à clics sont derrière Cloudflare. Un navigateur automatisé y reçoit une page **« Just a moment… »** au lieu du site. Trois niveaux de réponse sont déjà en place :
+
+1. **Empreinte cohérente** — l'User-Agent annonce la version réelle du moteur (et non une version périmée, écart qui suffit à déclencher un challenge), les *client hints* concordent, l'empreinte de bureau est réaliste (1366×768, fr-FR, fuseau de Cotonou), et `navigator.webdriver` est neutralisé avant le premier script de la page.
+2. **Attente du challenge** — le bot laisse jusqu'à `INSTAVA_CHALLENGE_WAIT_MS` (15 s) à la vérification pour se résoudre seule, comme le ferait un visiteur. Beaucoup de challenges « managed » passent sans intervention.
+3. **Rotation par proxy** — à chaque cycle, le bot sort par le proxy suivant de ta liste (69 proxys, c'est 69 adresses IP de plus que le VPS seul). Si le proxy choisi tombe sur un challenge, le cycle est **rejoué une fois immédiatement via le proxy suivant** de la liste. Un proxy qui échoue trois fois de suite est écarté automatiquement et signalé dans la liste.
+
+### Importer ta liste de proxys
+
+Dans l'application, section **Proxys et rotation**, colle la liste entière dans la zone de texte — une ligne par proxy, sans limite de nombre. Formats acceptés :
+
+```
+proxy1.webshare.io:8080:identifiant:motdepasse
+identifiant:motdepasse@proxy2.webshare.io:8080
+socks5://identifiant:motdepasse@proxy3.webshare.io:1080
+proxy4.webshare.io:8080          (identifiant et mot de passe communs, renseignés dessous)
+```
+
+L'import affiche le compte rendu : ajoutés, doublons ignorés (un proxy déjà présent n'est jamais ajouté deux fois), lignes rejetées avec leur numéro. Le premier import **active la rotation** automatiquement. Les lignes vides et les commentaires `#` sont ignorés.
+
+Ensuite :
+
+- **Rotation** — `dans l'ordre` prend les proxys un par un dans l'ordre de la liste et reboucle ; `au hasard` en tire un à chaque cycle, jamais deux fois de suite le même.
+- **Tester les proxys actifs** — vérifie chaque proxy (jusqu'à 25 à la fois) et affiche ceux qui répondent, leur latence et l'IP de sortie observée. Les proxys morts ou mal identifiés sont visibles en un clic.
+- **Décocher *Utiliser la rotation*** — revient à l'IP du VPS sans supprimer la liste.
+- Un proxy qui échoue trois fois de suite est **désactivé automatiquement** ; le bouton **Supprimer les proxys désactivés** nettoie la liste d'un coup.
+
+### Si le blocage persiste
+
+La cause dominante n'est alors plus le navigateur mais **la réputation de l'IP**. Une IP de datacenter (OVH, Hetzner, Scaleway…) est massivement utilisée par des robots : Cloudflare la traite en conséquence. Dans ce cas :
+
+- **Configure des proxys résidentiels** dans la section *Proxys et rotation* de l'application. C'est la solution qui marche réellement pour ce type de site.
+- **Une liste de proxys datacenter ne change souvent rien** : leur réputation est aussi mauvaise que celle de l'IP du VPS. 69 proxys datacenter, c'est 69 IP également mal notées — la rotation répartit le risque (moins de requêtes par IP, donc moins de blocages), mais elle ne transforme pas une IP datacenter en IP résidentielle. Si Cloudflare bloque encore après l'import de la liste, c'est le type de proxy qu'il faut changer, pas le nombre.
+- Pour vérifier ce qui sort réellement, clique sur **Tester les proxys actifs** : chaque proxy affiche son IP de sortie observée et sa latence. Les morts et ceux qui refusent les identifiants (407) apparaissent tout de suite.
+- Un challenge peut rester **insoluble** si le site exige un CAPTCHA interactif : aucun robot ne peut passer une case à cocher cliquée par un humain. Le bot s'arrête alors proprement et l'indique, sans consommer le quota.
+
+Le journal affiche dans ce cas :
+
+```
+✗ Boutique — Le site affiche une page de vérification Cloudflare (HTTP 403)
+  au lieu de la page réelle : il bloque le navigateur du VPS.
+  Essaie avec un proxy résidentiel Webshare, ou depuis une IP moins exposée.
+```
+
+Ce cycle **n'est pas compté** dans les clics du jour, puisque le site n'a jamais été atteint.
+
+> ⚠️ Le contournement d'une protection anti-bot peut violer les conditions d'utilisation du site visé. Ce réglage sert à rendre le bot présentable (empreinte cohérente, comportement humain), pas à casser une protection. À toi de vérifier que l'usage prévu est autorisé.
+
 ## 9. Dépannage
 
 | Symptôme | Cause probable | Solution |
@@ -351,6 +400,7 @@ En Docker : arrête la pile, restaure dans le volume avec `docker compose cp`, r
 | « Aucun lien ou bouton visible ne correspond » | Libellé différent sur la page | Utilise le texte affiché exact ; vide le champ pour laisser le bot choisir |
 | « Plusieurs éléments correspondent » | Libellé ambigu | Précise le texte (accents, casse ignorés, mais le libellé doit être unique) |
 | Les cycles ne partent plus | Écart de 5 minutes non écoulé, ou quota du jour atteint | Vérifie **Clics du jour** : 288 max par jour et par cible |
+| « Page de vérification Cloudflare » | IP de datacenter mal notée, ou navigateur détecté | Chapitre **8 bis** : configure un proxy résidentiel Webshare |
 | Session expirée sans cesse | Cookie `Secure` en HTTP | `INSTAVA_SECURE_COOKIES=false` (uniquement en réseau privé HTTP) |
 | Page blanche après mise à jour | Service worker en cache | Recharge en forçant (Safari : appui long sur ⟳), ou réinstalle la PWA |
 
@@ -373,7 +423,8 @@ Chaque cycle affiche une ligne du type :
 
 - **Mots de passe** : scrypt (N=16384, r=8, p=1), sel aléatoire par compte, comparaison à temps constant.
 - **Sessions** : jeton opaque de 32 octets, seul son SHA-256 est stocké. Cookie `HttpOnly`, `SameSite=Strict`, `Secure` derrière HTTPS. Expiration en base, purge automatique.
-- **Identifiants proxy** : AES-256-GCM avec clé dérivée (scrypt), fichier `secret.key` en `0600`. Jamais renvoyés au navigateur, jamais journalisés.
+- **Identifiants proxy** : AES-256-GCM avec clé dérivée (scrypt), fichier `secret.key` en `0600`. Jamais renvoyés au navigateur, jamais journalisés. La liste peut contenir autant de proxys que nécessaire ; seuls les identifiants sont chiffrés, l'aperçu affiché est masqué (`id••••••`).
+- **Migration** : au premier démarrage après mise à jour, une base existante passe en schéma 2 et l'ancien proxy unique est repris comme premier élément de la liste — rien à ressaisir.
 - **Anti-force brute** : 10 tentatives de connexion par quart d'heure et par IP, 5 inscriptions par heure.
 - **Réseau** : le conteneur n'expose pas son port ; seul Caddy y accède. HSTS, CSP stricte, `X-Frame-Options: DENY`, `nosniff`.
 - **Piège SSRF bloqué** : chaque URL (navigation *et* chaque sous-ressource, y compris après le clic) est vérifiée ; les adresses privées, locales et les résolutions DNS internes sont refusées.

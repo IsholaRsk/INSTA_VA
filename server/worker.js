@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { dayKeyIn } from './time.js';
+import { ChallengeError } from './browser.js';
 
 const LAUNCH_ERROR_RE = /Executable doesn\u2019t exist|Executable doesn't exist|Failed to launch|browserType\.launch/i;
 
@@ -9,6 +10,12 @@ const LAUNCH_ERROR_RE = /Executable doesn\u2019t exist|Executable doesn't exist|
  */
 export function friendlyCycleError(error) {
   const raw = String(error?.message || 'Échec du cycle.');
+  if (error instanceof ChallengeError || error?.name === 'ChallengeError') {
+    const status = error.httpStatus ? ` (HTTP ${error.httpStatus})` : '';
+    return `Le site affiche une page de vérification Cloudflare${status} au lieu de la page réelle : `
+      + 'il bloque le navigateur du VPS. Essaie avec un proxy résidentiel Webshare, '
+      + 'ou depuis une IP moins exposée.';
+  }
   if (LAUNCH_ERROR_RE.test(raw)) {
     return 'Chromium n’est pas installé ou ne démarre pas sur le VPS. Lancez « npx playwright install --with-deps chromium » (ou reconstruisez l’image Docker).';
   }
@@ -37,6 +44,7 @@ export function createWorker({
   openBrowser,
   runCycle,
   decryptProxy,
+  onProxyOutcome = () => {},
   logger = console,
   onChange = () => {},
 }) {
@@ -96,19 +104,49 @@ export function createWorker({
       return;
     }
 
+    // Proxy du cycle : rotation sur la liste activée (aucun si désactivée).
     let proxy = null;
-    try { proxy = decryptProxy(visit.user_id); }
-    catch (error) { logger.warn(`Proxy ignoré pour ${target.pseudo} : ${error.message}`); }
+    let proxyId = null;
+    try {
+      const picked = decryptProxy(visit.user_id);
+      if (picked && picked.proxy) { proxy = picked.proxy; proxyId = picked.id; }
+    } catch (error) { logger.warn(`Proxy ignoré pour ${target.pseudo} : ${error.message}`); }
 
     try {
       const browser = await getBrowser();
-      const result = await runCycle({
-        browser,
-        url: target.url,
-        linkLabel: target.link_label,
-        proxy,
-        navigationTimeout: config.navigationTimeoutMs,
-      });
+      let result;
+      try {
+        result = await runCycle({
+          browser,
+          url: target.url,
+          linkLabel: target.link_label,
+          proxy,
+          navigationTimeout: config.navigationTimeoutMs,
+          challengeWaitMs: config.challengeWaitMs,
+        });
+      } catch (error) {
+        // Blocage anti-bot : sans proxy, on rejoue une fois via la liste de
+        // proxys (autre IP) ; avec un proxy, on passe au suivant de la liste.
+        const blocked = error instanceof ChallengeError || error?.name === 'ChallengeError';
+        if (!blocked) throw error;
+        if (proxyId) onProxyOutcome(proxyId, visit.user_id, { success: false, error: 'Bloqué par Cloudflare' });
+        let fallback = null;
+        try { fallback = decryptProxy(visit.user_id); } catch { fallback = null; }
+        if (!fallback?.proxy) throw error;
+        logger.info(`↻ ${target.pseudo} — blocage, nouvel essai via ${fallback.proxy.host}:${fallback.proxy.port}.`);
+        proxy = fallback.proxy;
+        proxyId = fallback.id;
+        result = await runCycle({
+          browser,
+          url: target.url,
+          linkLabel: target.link_label,
+          proxy,
+          navigationTimeout: config.navigationTimeoutMs,
+          challengeWaitMs: config.challengeWaitMs,
+        });
+      }
+      // Le proxy utilisé est crédité du cycle réussi.
+      if (proxyId) onProxyOutcome(proxyId, visit.user_id, { success: true });
       store.finishVisit(visit.id, 'success', result);
       // Le clic réussi alimente le journal quotidien (quota de 100 clics/jour).
       store.addClick(visit.user_id, target.id, dayKeyIn(config.timeZone), 1);
@@ -117,6 +155,11 @@ export function createWorker({
       const message = friendlyCycleError(error);
       store.finishVisit(visit.id, 'failed', { message });
       logger.warn(`✗ ${target.pseudo} — ${message}`);
+      // Seules les erreurs réseau/anti-bot sont imputées au proxy ; une erreur
+      // de sélection (libellé introuvable) ne dit rien de sa qualité.
+      if (proxyId && !/Aucun lien|Plusieurs éléments|page a changé/i.test(message)) {
+        onProxyOutcome(proxyId, visit.user_id, { success: false, error: message });
+      }
       if (LAUNCH_ERROR_RE.test(message)) {
         const instance = await browserPromise?.catch(() => null);
         if (instance) await instance.close().catch(() => {});

@@ -1,4 +1,6 @@
 import { assertPublicRequestUrl } from './net-safety.js';
+import { detectChallengeSnapshot, challengeDebugInfo } from './challenge.js';
+import { contextProfile, stealthInitScript, STEALTH_ARGS } from './stealth.js';
 
 export const CLICKABLE_SELECTOR = 'a[href], [role="link"], button, input[type="button"], input[type="submit"], [role="button"], summary';
 
@@ -23,6 +25,8 @@ export async function openBrowser({ chromiumPath = null, headless = true } = {})
   const playwright = await loadPlaywright();
   const launchOptions = {
     headless,
+    // Signaux d'automatisation retirés + options de discrétion.
+    ignoreDefaultArgs: ['--enable-automation'],
     args: [
       '--disable-dev-shm-usage',
       '--no-sandbox',
@@ -30,10 +34,14 @@ export async function openBrowser({ chromiumPath = null, headless = true } = {})
       '--no-first-run',
       '--no-default-browser-check',
       '--disable-background-networking',
+      ...STEALTH_ARGS,
     ],
   };
   if (chromiumPath) launchOptions.executablePath = chromiumPath;
-  return playwright.chromium.launch(launchOptions);
+  const browser = await playwright.chromium.launch(launchOptions);
+  // La version réelle sert à construire un User-Agent crédible.
+  try { browser.__instavaVersion = browser.version(); } catch { browser.__instavaVersion = ''; }
+  return browser;
 }
 
 function proxyOption(secret) {
@@ -196,15 +204,20 @@ export function clickableSummary(candidates) {
  * l'élément demandé (ou l'élément principal), attendre la redirection.
  * Un libellé ambigu ou absent de la page annule le cycle sans clic.
  */
-export async function runCycle({ browser, url, linkLabel = '', proxy = null, navigationTimeout = NAVIGATION_TIMEOUT }) {
+export async function runCycle({
+  browser,
+  url,
+  linkLabel = '',
+  proxy = null,
+  navigationTimeout = NAVIGATION_TIMEOUT,
+  challengeWaitMs = 12000,
+}) {
   let context;
   try {
-    context = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
-      locale: 'fr-FR',
-      userAgent: contextUserAgent(),
-      proxy: proxyOption(proxy),
-    });
+    const profile = contextProfile(browserVersionOf(browser));
+    context = await browser.newContext({ ...profile, proxy: proxyOption(proxy) });
+    // Retire navigator.webdriver avant le premier script de la page.
+    await context.addInitScript({ content: stealthInitScript() });
     const page = await context.newPage();
     page.setDefaultNavigationTimeout(navigationTimeout);
     page.setDefaultTimeout(12000);
@@ -226,8 +239,13 @@ export async function runCycle({ browser, url, linkLabel = '', proxy = null, nav
       }
     });
 
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navigationTimeout });
+    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navigationTimeout });
     await waitForStable(page, navigationTimeout);
+
+    // Cloudflare et équivalents : la page intermédiaire dure 3 à 8 secondes.
+    // On lui laisse le temps de se résoudre avant de conclure à un blocage.
+    const challenge = await settleChallenge(page, { userUrl: url, waitMs: challengeWaitMs });
+    if (challenge) throw new ChallengeError(challenge, response ? response.status() : null);
 
     const expected = normalizeLabel(linkLabel);
     const candidates = await collectClickables(page, linkLabel);
@@ -273,6 +291,63 @@ export async function runCycle({ browser, url, linkLabel = '', proxy = null, nav
   }
 }
 
-function contextUserAgent() {
-  return 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+/** Version réelle du moteur, pour un User-Agent cohérent. */
+function browserVersionOf(browser) {
+  try { return browser.__instavaVersion || browser.version() || ''; } catch { return ''; }
+}
+
+/**
+ * Erreur dédiée : permet au worker de produire un message clair et de
+ * distinguer un blocage anti-bot d'un simple libellé introuvable.
+ */
+export class ChallengeError extends Error {
+  constructor(info, status = null) {
+    super('Page de vérification anti-bot (Cloudflare) affichée à la place du site.');
+    this.name = 'ChallengeError';
+    this.challenge = info?.kind || 'cloudflare';
+    this.reason = info?.reason || '';
+    this.httpStatus = status;
+  }
+}
+
+/**
+ * Attend la résolution d'une page de challenge, puis renvoie l'état final.
+ * Retourne `null` si la page réelle est affichée (ou si ce n'est pas un challenge).
+ */
+async function settleChallenge(page, { userUrl = '', waitMs = 12000 } = {}) {
+  const deadline = Date.now() + waitMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    const snapshot = await readSnapshot(page, userUrl);
+    if (!snapshot.challenge) return null;
+    last = snapshot;
+    await page.waitForTimeout(700);
+  }
+  return last?.challenge ? { ...last.challenge, debug: challengeDebugInfo(last) } : null;
+}
+
+/** Photographie le titre, l'URL et les marqueurs DOM de la page courante. */
+async function readSnapshot(page, userUrl = '') {
+  let title = '';
+  let html = '';
+  let currentUrl = '';
+  let selectors = '';
+  try { title = await page.title(); } catch { /* page en cours de navigation */ }
+  try { currentUrl = page.url(); } catch { currentUrl = userUrl; }
+  // Seuls le début du document et les sélecteurs connus sont lus : rapide et suffisant.
+  try {
+    html = await page.evaluate(() => {
+      const head = document.documentElement ? document.documentElement.outerHTML.slice(0, 20000) : '';
+      const found = ['#challenge-form', '#challenge-running', '#cf-challenge-running',
+        '.cf-browser-verification', 'iframe[src*="challenges.cloudflare.com"]',
+        'iframe[src*="captcha-delivery.com"]', '#px-captcha']
+        .filter((selector) => { try { return Boolean(document.querySelector(selector)); } catch { return false; } })
+        .join('|');
+      return head + (found ? ' | selectors=' + found : '');
+    });
+    const match = /\| selectors=([^|]*)$/.exec(html);
+    if (match) { selectors = match[1]; html = html.slice(0, match.index); }
+  } catch { /* document non accessible pendant la navigation */ }
+  const challenge = detectChallengeSnapshot({ title, html, url: currentUrl, selectors });
+  return { title, html, url: currentUrl, selectors, challenge };
 }

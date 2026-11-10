@@ -10,8 +10,10 @@ import path from 'node:path';
  *  - duration_days (durée en jours) et daily_minimum (100 clics/jour) ;
  *  - daily_clicks : journal des clics réellement effectués par jour et par cible ;
  *  - proxy_password chiffré AES-256-GCM, jamais en clair sur le disque.
+ *
+ * La v2 remplace le proxy unique par une liste illimitée avec rotation.
  */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const MIGRATION_V1 = `
 CREATE TABLE IF NOT EXISTS users (
@@ -109,6 +111,44 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 `;
 
+
+/**
+ * v2 : le proxy unique (`proxy_settings`) devient une liste illimitée (`proxies`)
+ * avec un état de rotation (`proxy_state`). L'ancien proxy, s'il existait, est
+ * repris comme premier élément de la liste pour ne rien perdre au déploiement.
+ */
+const MIGRATION_V2 = `
+CREATE TABLE IF NOT EXISTS proxies (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  label TEXT NOT NULL DEFAULT '',
+  scheme TEXT NOT NULL,
+  host TEXT NOT NULL,
+  port INTEGER NOT NULL,
+  username_masked TEXT NOT NULL,
+  secret_box TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  cycles INTEGER NOT NULL DEFAULT 0,
+  successes INTEGER NOT NULL DEFAULT 0,
+  failures INTEGER NOT NULL DEFAULT 0,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  last_used_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS proxies_user_idx ON proxies (user_id, created_at);
+
+CREATE TABLE IF NOT EXISTS proxy_state (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  rotation TEXT NOT NULL DEFAULT 'order' CHECK (rotation IN ('order', 'random')),
+  cursor INTEGER NOT NULL DEFAULT 0,
+  disable_after INTEGER NOT NULL DEFAULT 3,
+  last_proxy_id TEXT,
+  updated_at TEXT NOT NULL
+);
+`;
+
 function tableExists(db, name) {
   const row = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
   return Boolean(row);
@@ -135,6 +175,33 @@ export function openDatabase(file, { log = () => {} } = {}) {
     db.exec('BEGIN');
     try {
       db.exec(MIGRATION_V1);
+      db.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', '1') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+  if (current < 2) {
+    if (current >= 1) log('Migration v2 : liste de proxys avec rotation');
+    db.exec('BEGIN');
+    try {
+      db.exec(MIGRATION_V2);
+      // L'ancien proxy unique devient le premier de la liste (identifiants déjà chiffrés).
+      if (tableExists(db, 'proxy_settings')) {
+        const legacy = db.prepare('SELECT * FROM proxy_settings').all();
+        const insert = db.prepare(`INSERT INTO proxies (id, user_id, label, scheme, host, port,
+            username_masked, secret_box, enabled, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`);
+        const stamp = new Date().toISOString();
+        for (const row of legacy) {
+          insert.run(`legacy-${row.user_id}`, row.user_id, 'Ancien proxy unique', row.scheme,
+            row.host, row.port, row.username_masked, row.secret_box, stamp);
+          db.prepare(`INSERT INTO proxy_state (user_id, enabled, rotation, cursor, disable_after, updated_at)
+            VALUES (?, 1, 'order', 0, 3, ?) ON CONFLICT (user_id) DO NOTHING`).run(row.user_id, stamp);
+        }
+        db.exec('DROP TABLE IF EXISTS proxy_settings');
+      }
       db.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
         .run(String(SCHEMA_VERSION));
       db.exec('COMMIT');

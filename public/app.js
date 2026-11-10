@@ -16,7 +16,6 @@ let serverInfo = null;
 let targets = [];
 let selectedIds = new Set();
 let editingId = null;
-let proxyConfigured = false;
 let runActive = false;
 let refreshTimer = null;
 let toastTimer = null;
@@ -525,16 +524,141 @@ async function startRun() {
   }
 }
 
-/* ---------------------------------- proxy --------------------------------- */
+/* ---------------------------------- proxys -------------------------------- */
+
+const proxyList = $('#proxy-list');
+let proxyRecords = [];
+let proxyState = null;
+let proxyTesting = false;
+
+function formatRelative(value) {
+  if (!value) return 'jamais utilisé';
+  const diff = Date.now() - new Date(value).getTime();
+  if (!Number.isFinite(diff) || diff < 0) return formatDate(value);
+  const minutes = Math.round(diff / 60000);
+  if (minutes < 1) return 'à l’instant';
+  if (minutes < 60) return `il y a ${minutes} min`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `il y a ${hours} h`;
+  return `il y a ${Math.round(hours / 24)} j`;
+}
+
+function proxyPercent(proxy) {
+  if (!proxy.cycles) return null;
+  return Math.round((proxy.successes / proxy.cycles) * 100);
+}
+
+function renderProxies() {
+  const badge = $('#proxy-badge');
+  const enabledCount = proxyRecords.filter((proxy) => proxy.enabled).length;
+  if (!proxyRecords.length) {
+    badge.textContent = 'Aucun proxy';
+    badge.className = 'status-badge status-neutral';
+  } else if (!proxyState?.enabled) {
+    badge.textContent = `${proxyRecords.length} importé(s) · rotation arrêtée`;
+    badge.className = 'status-badge status-warning';
+  } else if (!enabledCount) {
+    badge.textContent = 'Tous désactivés';
+    badge.className = 'status-badge status-error';
+  } else {
+    badge.textContent = `${enabledCount} actif(s) sur ${proxyRecords.length}`;
+    badge.className = 'status-badge status-success';
+  }
+
+  const cycles = proxyRecords.reduce((sum, proxy) => sum + proxy.cycles, 0);
+  const order = proxyState?.rotation === 'random' ? 'au hasard' : 'dans l’ordre';
+  $('#proxy-summary').textContent = proxyRecords.length
+    ? `${proxyRecords.length} proxy(s) · ${cycles} cycle(s) effectué(s) · rotation ${order}${proxyState?.rotation === 'order' && proxyRecords.length ? ` · prochain : n°${(Number(proxyState.cursor || 0) % proxyRecords.length) + 1}` : ''}`
+    : 'Aucun proxy importé. Le bot sortira par l’IP du VPS.';
+  $('#proxy-enabled').checked = Boolean(proxyState?.enabled);
+  $('#proxy-rotation').value = proxyState?.rotation === 'random' ? 'random' : 'order';
+  $('#remove-proxy').classList.toggle('hidden', !proxyRecords.some((proxy) => !proxy.enabled));
+
+  proxyList.replaceChildren();
+  if (!proxyRecords.length) {
+    proxyList.append(node('div', 'empty-state', 'Collez votre liste ci-dessus pour ajouter vos proxys.'));
+    return;
+  }
+  proxyRecords.forEach((proxy) => {
+    const row = node('div', 'proxy-row');
+    if (!proxy.enabled) row.classList.add('is-off');
+
+    const main = node('div', 'proxy-main');
+    const title = node('div', 'proxy-row-head');
+    title.append(node('strong', '', `${proxy.host}:${proxy.port}`));
+    const dot = node('span', `proxy-dot${proxy.last_error ? ' is-bad' : proxy.cycles ? ' is-good' : ''}`, '');
+    title.append(dot);
+    const tags = node('div', 'proxy-tags');
+    tags.append(node('span', 'proxy-tag', proxy.scheme.toUpperCase()));
+    if (proxy.username) tags.append(node('span', 'proxy-tag', proxy.username));
+    if (!proxy.enabled) tags.append(node('span', 'proxy-tag is-off', 'désactivé'));
+    else if (proxy.consecutive_failures) tags.append(node('span', 'proxy-tag is-warn', `${proxy.consecutive_failures} échec(s) de suite`));
+    const rate = proxyPercent(proxy);
+    if (rate !== null) tags.append(node('span', 'proxy-tag', `${rate}% de réussite · ${proxy.cycles} cycle(s)`));
+    tags.append(node('span', 'proxy-tag is-muted', formatRelative(proxy.last_used_at)));
+    main.append(title, tags);
+    if (proxy.last_error) main.append(node('p', 'proxy-error', `Dernière erreur : ${proxy.last_error}`));
+
+    const actions = node('div', 'proxy-actions');
+    actions.append(
+      buildToggle(proxy),
+      buildTestButton(proxy),
+      buildDeleteButton(proxy),
+    );
+    row.append(main, actions);
+    proxyList.append(row);
+  });
+}
+
+function buildToggle(proxy) {
+  const label = node('label', 'check-row proxy-toggle');
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.checked = proxy.enabled;
+  input.addEventListener('change', async () => {
+    input.disabled = true;
+    try {
+      await apiRequest('/api/proxies', { method: 'PATCH', body: JSON.stringify({ id: proxy.id, enabled: input.checked }) });
+      await loadProxyStatus();
+    } catch (error) {
+      setFormMessage($('#proxy-message'), displayError(error), 'error');
+      input.checked = !input.checked;
+    } finally { input.disabled = false; }
+  });
+  label.append(input, node('span', '', 'Actif'));
+  return label;
+}
+
+function buildTestButton(proxy) {
+  const button = node('button', 'button button-quiet proxy-action', 'Tester');
+  button.type = 'button';
+  button.disabled = proxyTesting;
+  button.addEventListener('click', () => testProxies([proxy.id], button));
+  return button;
+}
+
+function buildDeleteButton(proxy) {
+  const button = node('button', 'button button-quiet proxy-action', 'Supprimer');
+  button.type = 'button';
+  button.addEventListener('click', async () => {
+    if (!window.confirm(`Supprimer ${proxy.host}:${proxy.port} de la liste ?`)) return;
+    button.disabled = true;
+    try {
+      await apiRequest(`/api/proxies?id=${encodeURIComponent(proxy.id)}`, { method: 'DELETE' });
+      setFormMessage($('#proxy-message'), 'Proxy supprimé.', 'success');
+      await loadProxyStatus();
+    } catch (error) { setFormMessage($('#proxy-message'), displayError(error), 'error'); }
+    finally { button.disabled = false; }
+  });
+  return button;
+}
 
 async function loadProxyStatus() {
   try {
-    const data = await apiRequest('/api/proxy');
-    proxyConfigured = Boolean(data.configured);
-    const badge = $('#proxy-badge');
-    badge.textContent = proxyConfigured ? `Configuré · ${data.host}:${data.port}` : 'Non configuré';
-    badge.className = proxyConfigured ? 'status-badge status-success' : 'status-badge status-neutral';
-    $('#remove-proxy').classList.toggle('hidden', !proxyConfigured);
+    const data = await apiRequest('/api/proxies');
+    proxyRecords = data.proxies || [];
+    proxyState = data.state || null;
+    renderProxies();
   } catch (error) {
     setFormMessage($('#proxy-message'), displayError(error), 'error');
   }
@@ -543,39 +667,93 @@ async function loadProxyStatus() {
 async function saveProxy(event) {
   event.preventDefault();
   const button = $('#save-proxy');
+  const text = $('#proxy-text').value.trim();
+  if (!text) {
+    setFormMessage($('#proxy-message'), 'Collez au moins une ligne de proxy.', 'error');
+    return;
+  }
   button.disabled = true;
+  setFormMessage($('#proxy-message'), 'Import en cours…');
   try {
-    await apiRequest('/api/proxy', {
+    const data = await apiRequest('/api/proxies', {
       method: 'POST',
       body: JSON.stringify({
-        scheme: $('#proxy-scheme').value,
-        host: $('#proxy-host').value.trim(),
-        port: Number($('#proxy-port').value),
-        username: $('#proxy-username').value,
-        password: $('#proxy-password').value,
+        text,
+        defaultScheme: $('#proxy-scheme').value,
+        defaultUsername: $('#proxy-username').value,
+        defaultPassword: $('#proxy-password').value,
       }),
     });
+    // Les champs sensibles sont effacés dès que le serveur les a chiffrés.
+    $('#proxy-text').value = '';
     $('#proxy-username').value = '';
     $('#proxy-password').value = '';
-    setFormMessage($('#proxy-message'), 'Identifiants chiffrés sur le VPS. Les champs ont été effacés.', 'success');
+    const details = Array.isArray(data.errors) && data.errors.length
+      ? ` Premières lignes rejetées : ${data.errors.slice(0, 3).map((error) => `ligne ${error.line || '?'} (${error.message})`).join(' ; ')}.`
+      : '';
+    const kind = data.rejected && !data.added ? 'error' : 'success';
+    setFormMessage($('#proxy-message'), `${data.message}${details}`, kind);
     await loadProxyStatus();
-  } catch (error) { setFormMessage($('#proxy-message'), displayError(error), 'error'); }
-  finally { button.disabled = false; }
+  } catch (error) {
+    setFormMessage($('#proxy-message'), displayError(error), 'error');
+  } finally { button.disabled = false; }
+}
+
+async function testProxies(ids, button) {
+  const target = button || $('#test-proxies');
+  proxyTesting = true;
+  const oldText = target.textContent;
+  target.disabled = true;
+  target.textContent = 'Test en cours…';
+  setFormMessage($('#proxy-message'), 'Test des proxys : un aller-retour par proxy, cela peut prendre quelques secondes.');
+  document.querySelectorAll('.proxy-action').forEach((item) => { item.disabled = true; });
+  try {
+    const data = await apiRequest('/api/proxies/test', {
+      method: 'POST',
+      body: JSON.stringify(ids && ids.length ? { ids } : {}),
+    });
+    const results = data.results || [];
+    const ok = results.filter((item) => item.ok).length;
+    const failures = results.filter((item) => !item.ok).slice(0, 3)
+      .map((item) => `${item.host}:${item.port} (${item.message})`).join(' ; ');
+    setFormMessage(
+      $('#proxy-message'),
+      `${ok} proxy(s) sur ${results.length} répondent.${failures ? ` Échecs : ${failures}.` : ''}`,
+      ok === results.length ? 'success' : 'error',
+    );
+    await loadProxyStatus();
+  } catch (error) {
+    setFormMessage($('#proxy-message'), displayError(error), 'error');
+  } finally {
+    proxyTesting = false;
+    target.textContent = oldText;
+    target.disabled = false;
+    document.querySelectorAll('.proxy-action').forEach((item) => { item.disabled = false; });
+  }
+}
+
+async function saveProxyState() {
+  try {
+    const data = await apiRequest('/api/proxies', {
+      method: 'PATCH',
+      body: JSON.stringify({ state: { enabled: $('#proxy-enabled').checked, rotation: $('#proxy-rotation').value } }),
+    });
+    proxyState = data.state;
+    renderProxies();
+    setFormMessage($('#proxy-message'), 'Réglages de rotation enregistrés.', 'success');
+  } catch (error) {
+    setFormMessage($('#proxy-message'), displayError(error), 'error');
+  }
 }
 
 async function removeProxy() {
-  if (!window.confirm('Supprimer les identifiants Webshare stockés sur le VPS ?')) return;
+  if (!window.confirm('Supprimer définitivement les proxys désactivés ?')) return;
   const button = $('#remove-proxy');
   button.disabled = true;
   try {
-    await apiRequest('/api/proxy', { method: 'DELETE' });
-    proxyConfigured = false;
-    $('#proxy-password').value = '';
-    $('#proxy-username').value = '';
-    $('#proxy-badge').textContent = 'Non configuré';
-    $('#proxy-badge').className = 'status-badge status-neutral';
-    button.classList.add('hidden');
-    setFormMessage($('#proxy-message'), 'Identifiants supprimés.', 'success');
+    const data = await apiRequest('/api/proxies?id=disabled', { method: 'DELETE' });
+    setFormMessage($('#proxy-message'), data.message || 'Proxys supprimés.', 'success');
+    await loadProxyStatus();
   } catch (error) { setFormMessage($('#proxy-message'), displayError(error), 'error'); }
   finally { button.disabled = false; }
 }
@@ -618,6 +796,9 @@ async function boot() {
   startButton.addEventListener('click', startRun);
   $('#proxy-form').addEventListener('submit', saveProxy);
   $('#remove-proxy').addEventListener('click', removeProxy);
+  $('#test-proxies').addEventListener('click', () => testProxies(null, $('#test-proxies')));
+  $('#proxy-enabled').addEventListener('change', saveProxyState);
+  $('#proxy-rotation').addEventListener('change', saveProxyState);
   $('#refresh-activity').addEventListener('click', loadActivity);
   $('#logout-button').addEventListener('click', logout);
 

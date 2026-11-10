@@ -25,7 +25,11 @@ function startServer() {
   });
   const db = openDatabase(config.databaseFile);
   const store = createStore(db);
-  const { server, worker } = createApp({ config, store, logger: silentLogger, startWorker: false });
+  const { server, worker } = createApp({
+    config, store, logger: silentLogger, startWorker: false,
+    // Limites larges : les tests créent plusieurs comptes depuis la même IP.
+    limits: { login: { windowMs: 60_000, max: 1000 }, signup: { windowMs: 60_000, max: 1000 } },
+  });
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address();
@@ -144,28 +148,86 @@ test('lancement : calendrier de visites avec 288 clics maximum par jour', async 
   } finally { await ctx.close(); }
 });
 
-test('proxy : les identifiants sont chiffrés et jamais renvoyés en clair', async () => {
+test('proxys : import en masse, déduplication, chiffrement et rotation', async () => {
   const ctx = await startServer();
   try {
     const { cookie } = await call(ctx, 'POST', '/api/auth/register', { email: 'c@exemple.test', password: 'motdepasse-solide' });
-    const saved = await call(ctx, 'POST', '/api/proxy', {
-      scheme: 'http', host: 'proxy.exemple.fr', port: 8000,
-      username: 'identifiantfictif', password: 'motdepassefictif',
-    }, cookie);
-    assert.equal(saved.status, 200);
+    const text = [
+      'proxy1.exemple.fr:8000:identifiantfictif:motdepassefictif',
+      'proxy2.exemple.fr:8001:identifiantfictif:motdepassefictif',
+      'identifiantfictif:motdepassefictif@proxy3.exemple.fr:8002',
+      'proxy1.exemple.fr:8000:identifiantfictif:motdepassefictif',
+      'ligne-invalide',
+    ].join('\n');
+    const imported = await call(ctx, 'POST', '/api/proxies', { text }, cookie);
+    assert.equal(imported.status, 201);
+    assert.equal(imported.data.added, 3, 'trois proxys uniques');
+    assert.ok(imported.data.duplicates >= 1, 'doublon signalé');
+    assert.ok(imported.data.rejected >= 1, 'ligne invalide rejetée');
+    // Le premier import active la rotation.
+    assert.equal(imported.data.state.enabled, true);
 
-    const row = ctx.store.getProxySettings(ctx.store.listUsers()[0].id);
-    assert.ok(!row.secret_box.includes('motdepassefictif'), 'aucun secret en clair dans la base');
-    assert.match(row.secret_box, /^v1\./);
+    const listed = await call(ctx, 'GET', '/api/proxies', null, cookie);
+    assert.equal(listed.status, 200);
+    assert.equal(listed.data.proxies.length, 3);
+    assert.equal(listed.data.state.rotation, 'order');
+    // Aucun secret en clair dans la réponse.
+    const payload = JSON.stringify(listed.data);
+    assert.ok(!payload.includes('motdepassefictif'));
+    assert.ok(!payload.includes('identifiantfictif'));
 
-    const status = await call(ctx, 'GET', '/api/proxy', null, cookie);
-    assert.equal(status.status, 200);
-    assert.equal(status.data.configured, true);
-    assert.ok(!JSON.stringify(status.data).includes('motdepassefictif'));
-    assert.ok(!JSON.stringify(status.data).includes('identifiantfictif'));
+    // La base ne contient que des secrets chiffrés.
+    const rows = ctx.store.raw.prepare('SELECT * FROM proxies').all();
+    assert.equal(rows.length, 3);
+    for (const row of rows) {
+      assert.ok(!row.secret_box.includes('motdepassefictif'), 'chiffré en base');
+      assert.match(row.secret_box, /^v1\./);
+    }
 
-    const removed = await call(ctx, 'DELETE', '/api/proxy', null, cookie);
-    assert.equal(removed.status, 200);
+    // Rotation : ordre puis retour au début.
+    const order = [0, 1, 2, 3].map(() => {
+      const picked = ctx.store.listProxies(ctx.store.listUsers()[0].id);
+      const state = ctx.store.getProxyState(ctx.store.listUsers()[0].id);
+      const index = state.cursor % picked.length;
+      ctx.store.saveProxyState(ctx.store.listUsers()[0].id, { cursor: (index + 1) % picked.length });
+      return picked[index].host;
+    });
+    assert.deepEqual(order, ['proxy1.exemple.fr', 'proxy2.exemple.fr', 'proxy3.exemple.fr', 'proxy1.exemple.fr']);
+
+    // Désactivation d'un proxy.
+    const first = listed.data.proxies[0];
+    const patched = await call(ctx, 'PATCH', '/api/proxies', { id: first.id, enabled: false }, cookie);
+    assert.equal(patched.status, 200);
+    assert.equal(patched.data.proxy.enabled, false);
+
+    // Suppression en masse des proxys désactivés.
+    const purged = await call(ctx, 'DELETE', '/api/proxies?id=disabled', null, cookie);
+    assert.equal(purged.data.removed, 1);
+    assert.equal((await call(ctx, 'GET', '/api/proxies', null, cookie)).data.proxies.length, 2);
+  } finally { await ctx.close(); }
+});
+
+test('proxys : aucune limite de nombre à l’import', async () => {
+  const ctx = await startServer();
+  try {
+    const { cookie } = await call(ctx, 'POST', '/api/auth/register', { email: 'e@exemple.test', password: 'motdepasse-solide' });
+    // 120 proxys : bien au-delà de l'ancienne limite de 100 de l'extension.
+    const lines = Array.from({ length: 120 }, (_, index) => `proxy${index}.exemple.fr:${8000 + index}:identifiantfictif:motdepassefictif`);
+    const imported = await call(ctx, 'POST', '/api/proxies', { text: lines.join('\n') }, cookie);
+    assert.equal(imported.status, 201);
+    assert.equal(imported.data.added, 120);
+    assert.equal((await call(ctx, 'GET', '/api/proxies', null, cookie)).data.totals.count, 120);
+  } finally { await ctx.close(); }
+});
+
+test('proxys : un import vide ou entièrement invalide est refusé', async () => {
+  const ctx = await startServer();
+  try {
+    const { cookie } = await call(ctx, 'POST', '/api/auth/register', { email: 'f@exemple.test', password: 'motdepasse-solide' });
+    assert.equal((await call(ctx, 'POST', '/api/proxies', { text: '   ' }, cookie)).status, 400);
+    const invalid = await call(ctx, 'POST', '/api/proxies', { text: 'pas-un-proxy\nencore-moins' }, cookie);
+    assert.equal(invalid.status, 400);
+    assert.match(invalid.data.error, /Aucun proxy/);
   } finally { await ctx.close(); }
 });
 
@@ -188,5 +250,64 @@ test('sécurité : méthodes inconnues, chemins inconnus et traversée de réper
     assert.equal(index.status, 200);
     assert.match(index.headers.get('content-security-policy') || '', /default-src 'self'/);
     assert.equal(index.headers.get('x-frame-options'), 'DENY');
+  } finally { await ctx.close(); }
+});
+
+test('proxys : la rotation alimente chaque cycle dans l’ordre, puis reboucle', async () => {
+  const ctx = await startServer();
+  try {
+    const { cookie } = await call(ctx, 'POST', '/api/auth/register', { email: 'g@exemple.test', password: 'motdepasse-solide' });
+    const lines = [1, 2, 3].map((index) => `proxy${index}.exemple.fr:${8000 + index}:identifiantfictif:motdepassefictif`);
+    await call(ctx, 'POST', '/api/proxies', { text: lines.join('\n') }, cookie);
+
+    // Réglage : rotation aléatoire puis retour à l'ordre.
+    const random = await call(ctx, 'PATCH', '/api/proxies', { state: { rotation: 'random', enabled: true } }, cookie);
+    assert.equal(random.data.state.rotation, 'random');
+    const ordered = await call(ctx, 'PATCH', '/api/proxies', { state: { rotation: 'order', cursor: 0 } }, cookie);
+    assert.equal(ordered.data.state.rotation, 'order');
+
+    // La rotation est exposée en lecture pour l'interface.
+    const listed = await call(ctx, 'GET', '/api/proxies', null, cookie);
+    assert.equal(listed.data.state.enabled, true);
+    assert.equal(listed.data.state.disableAfter, 3);
+    assert.equal(listed.data.totals.enabled, 3);
+  } finally { await ctx.close(); }
+});
+
+test('proxys : l’auto-désactivation survient après trois échecs consécutifs', async () => {
+  const ctx = await startServer();
+  try {
+    const { cookie } = await call(ctx, 'POST', '/api/auth/register', { email: 'h@exemple.test', password: 'motdepasse-solide' });
+    const user = ctx.store.listUsers()[0];
+    await call(ctx, 'POST', '/api/proxies', { text: 'proxy1.exemple.fr:8000:identifiantfictif:motdepassefictif' }, cookie);
+    const proxy = ctx.store.listProxies(user.id)[0];
+
+    // Un succès remet le compteur à zéro.
+    ctx.store.recordProxyOutcome(proxy.id, { success: true });
+    assert.equal(ctx.store.getProxy(user.id, proxy.id).consecutive_failures, 0);
+
+    let result;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      result = ctx.store.recordProxyOutcome(proxy.id, { success: false, error: 'timeout', disableAfter: 3 });
+    }
+    assert.equal(result.disabled, true, 'désactivé au troisième échec');
+    assert.equal(ctx.store.getProxy(user.id, proxy.id).enabled, false);
+    assert.equal(ctx.store.getProxy(user.id, proxy.id).last_error, 'timeout');
+  } finally { await ctx.close(); }
+});
+
+test('proxys : réimporter la même liste ne produit pas d’erreur', async () => {
+  const ctx = await startServer();
+  try {
+    const { cookie } = await call(ctx, 'POST', '/api/auth/register', { email: 'i@exemple.test', password: 'motdepasse-solide' });
+    const text = 'proxy1.exemple.fr:8000:identifiantfictif:motdepassefictif';
+    const first = await call(ctx, 'POST', '/api/proxies', { text }, cookie);
+    assert.equal(first.status, 201);
+    assert.equal(first.data.added, 1);
+    const again = await call(ctx, 'POST', '/api/proxies', { text }, cookie);
+    assert.equal(again.status, 200);
+    assert.equal(again.data.added, 0);
+    assert.equal(again.data.duplicates, 1);
+    assert.match(again.data.message, /déjà dans la liste/);
   } finally { await ctx.close(); }
 });
