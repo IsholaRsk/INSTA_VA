@@ -4,11 +4,6 @@ import { ChallengeError } from './browser.js';
 
 const LAUNCH_ERROR_RE = /Executable doesn\u2019t exist|Executable doesn't exist|Failed to launch|browserType\.launch/i;
 
-// Un refus pare-feu (1020) est une décision du site, pas un incident passager.
-// Après ce nombre de refus consécutifs sur une même cible, la série est arrêtée
-// au lieu de réessayer jusqu'à 288 fois par jour pour rien.
-const HARD_BLOCK_STOP_AFTER = 3;
-
 /**
  * Traduit les erreurs techniques en messages actionnables depuis un téléphone,
  * sans exposer de chemins internes ni de détails du serveur.
@@ -80,10 +75,6 @@ export function createWorker({
     return browserPromise;
   }
 
-  // Refus consécutifs par cible : un site qui bloque en 1020 ne se débloquera
-  // pas en réessayant 288 fois dans la journée.
-  const hardBlockStreak = new Map();
-
   function refreshRunStatus(runId) {
     const counts = store.raw.prepare(`
       SELECT
@@ -151,47 +142,66 @@ export function createWorker({
 
     try {
       const browser = await getBrowser();
-      let result;
-      try {
-        result = await runCycle({
-          browser,
-          url: target.url,
-          linkLabel: target.link_label,
-          proxy,
-          navigationTimeout: config.navigationTimeoutMs,
-          challengeWaitMs: config.challengeWaitMs,
-          storageState,
-          onStorageState: keepSession,
-        });
-      } catch (error) {
-        // Blocage anti-bot : sans proxy, on rejoue une fois via la liste de
-        // proxys (autre IP) ; avec un proxy, on passe au suivant de la liste.
-        const blocked = error instanceof ChallengeError || error?.name === 'ChallengeError';
-        if (!blocked) throw error;
-        // Un blocage pare-feu (1020) ne dit rien de la qualité du proxy : le
-        // site refuse l'accès en bloc. Imputer l'échec au proxy désactiverait
-        // toute la liste, y compris des proxys parfaitement sains.
-        const hardBlock = error.challenge === 'blocked';
-        if (proxyId && !hardBlock) onProxyOutcome(proxyId, visit.user_id, { success: false, error: 'Bloqué par Cloudflare' });
-        let fallback = null;
-        try { fallback = decryptProxy(visit.user_id); } catch { fallback = null; }
-        if (!fallback?.proxy) throw error;
-        logger.info(`↻ ${target.pseudo} — blocage, nouvel essai via ${fallback.proxy.host}:${fallback.proxy.port}.`);
-        proxy = fallback.proxy;
-        proxyId = fallback.id;
-        result = await runCycle({
-          browser,
-          url: target.url,
-          linkLabel: target.link_label,
-          proxy,
-          navigationTimeout: config.navigationTimeoutMs,
-          challengeWaitMs: config.challengeWaitMs,
-          storageState,
-          onStorageState: keepSession,
-        });
+      // Toutes les tentatives sont faites : un blocage n'arrête plus la série.
+      // On essaie successivement des IP distinctes (nombre fixé par
+      // INSTAVA_PROXY_ATTEMPTS), chacune avec les cookies de la cible.
+      const maxAttempts = Math.max(1, Number(config.proxyAttempts ?? 3) || 1);
+      const triedProxies = new Set(proxyId ? [proxyId] : []);
+      let result = null;
+      let lastError = null;
+
+      for (let index = 0; index < maxAttempts; index += 1) {
+        if (index > 0) {
+          // Nouvelle IP : on écarte celles déjà essayées sur cette visite.
+          // Si la liste est épuisée, on reprend le même proxy plutôt que
+          // d'abandonner : la tentative doit avoir lieu.
+          let next = null;
+          try {
+            for (let draw = 0; draw < 8 && !next; draw += 1) {
+              const candidate = decryptProxy(visit.user_id);
+              if (!candidate?.proxy) break;
+              if (!triedProxies.has(candidate.id) || draw === 7) next = candidate;
+            }
+          } catch { next = null; }
+          if (next?.proxy) {
+            proxy = next.proxy;
+            proxyId = next.id;
+            triedProxies.add(proxyId);
+            logger.info(`↻ ${target.pseudo} — tentative ${index + 1}/${maxAttempts} via ${proxy.host}:${proxy.port}.`);
+          }
+        }
+
+        try {
+          result = await runCycle({
+            browser,
+            url: target.url,
+            linkLabel: target.link_label,
+            proxy,
+            navigationTimeout: config.navigationTimeoutMs,
+            challengeWaitMs: config.challengeWaitMs,
+            storageState,
+            onStorageState: keepSession,
+          });
+          if (proxyId) onProxyOutcome(proxyId, visit.user_id, { success: true });
+          break;
+        } catch (error) {
+          lastError = error;
+          const challenge = error instanceof ChallengeError || error?.name === 'ChallengeError';
+          const hardBlock = challenge && error.challenge === 'blocked';
+          // Un refus global (1020) ne dit rien de la qualité du proxy : le site
+          // refuse l'accès en bloc. Un challenge, lui, est imputable à l'IP.
+          if (proxyId && challenge && !hardBlock) {
+            onProxyOutcome(proxyId, visit.user_id, { success: false, error: 'Bloqué par Cloudflare' });
+          }
+          // Une page de vérification doit avoir le temps de se débloquer : c'est
+          // un aller-retour facturé au temps du cycle, pas un motif d'arrêt.
+          if (!challenge) throw error;
+          logger.warn(`✗ ${target.pseudo} — tentative ${index + 1}/${maxAttempts} : ${friendlyCycleError(error)}`);
+        }
       }
-      // Le proxy utilisé est crédité du cycle réussi.
-      if (proxyId) onProxyOutcome(proxyId, visit.user_id, { success: true });
+
+      if (!result) throw lastError || new Error('Aucune tentative n’a abouti.');
+
       store.finishVisit(visit.id, 'success', result);
       // Le clic réussi alimente le journal quotidien (quota de 100 clics/jour).
       store.addClick(visit.user_id, target.id, dayKeyIn(config.timeZone), 1);
@@ -204,20 +214,8 @@ export function createWorker({
       store.finishVisit(visit.id, 'failed', { message });
       logger.warn(`✗ ${target.pseudo} — ${message}`);
 
-      const refused = (error instanceof ChallengeError || error?.name === 'ChallengeError')
-        && error.challenge === 'blocked';
-      if (refused) {
-        const streak = (hardBlockStreak.get(visit.target_id) || 0) + 1;
-        hardBlockStreak.set(visit.target_id, streak);
-        if (streak >= HARD_BLOCK_STOP_AFTER) {
-          // Inutile de consommer le quota : on arrête la série et on le dit.
-          const cancelled = store.cancelPendingVisits(visit.user_id, visit.run_id);
-          hardBlockStreak.delete(visit.target_id);
-          logger.warn(`■ ${target.pseudo} — refus répété (${streak} fois) : série arrêtée, ${cancelled} visite(s) annulée(s).`);
-        }
-      } else if (!(error instanceof ChallengeError || error?.name === 'ChallengeError')) {
-        hardBlockStreak.delete(visit.target_id);
-      }
+      // Plus d'arrêt de série : un refus du site est consigné visite par visite
+      // et la suite continue. Seul le compte rendu le signale.
       // Seules les erreurs réseau/anti-bot sont imputées au proxy ; une erreur
       // de sélection (libellé introuvable) ou un refus global du site (1020)
       // ne disent rien de sa qualité.
@@ -264,6 +262,11 @@ export function createWorker({
         .finally(() => {
           active.delete(jobId);
           onChange({ type: 'free' });
+          // Une place s'est libérée : on relance tout de suite au lieu
+          // d'attendre le prochain tick. C'est ce qui fait la différence entre
+          // une série qui avance au rythme des cycles et une qui avance au
+          // rythme du minuteur (5 s d'attente par visite auparavant).
+          if (running) setImmediate(() => { tick().catch((error) => logger.error('tick échoué', error?.message)); });
         });
     }
   }

@@ -414,6 +414,35 @@ Deux conséquences concrètes :
 
 **Le bouton Tester te donne désormais ce verdict.** Après un test, chaque proxy affiche la nature de son IP de sortie : `Datacenter · OVH (AS16276)`, `Résidentiel · Free SAS`, ou `Nature d’IP inconnue`. Le compte rendu global indique combien de tes proxys sortent par un hébergeur — s'ils le font tous, la question n'est plus « combien de proxys » mais « quel type de proxys ».
 
+### Vitesse et tentatives
+
+Le bot avance maintenant à la vitesse de Chromium, plus à celle d'un minuteur.
+
+| Réglage | Avant | Maintenant |
+|---|---|---|
+| Cadence de la boucle (`INSTAVA_TICK_MS`) | 5 s | **1 s** |
+| Écart entre deux visites en mode objectif | 1,5–3,5 s | **0** (`INSTAVA_GOAL_GAP_MS`) |
+| Attente après une place libérée | jusqu'à 5 s | **immédiate** |
+| Observation de page après chargement | 1,8 s | 0,7 s (`INSTAVA_PAGE_STABLE_MS`) |
+
+Mesuré : **20 visites enchaînées en 53 ms** au lieu de ~150 s avec les anciens délais (hors temps réel de chargement des pages).
+
+Le mode **intervalle** garde ses 5 minutes entre deux clics : c'est la règle du calendrier, elle n'est pas touchée.
+
+**Toutes les tentatives sont faites, même en cas de blocage.** L'arrêt automatique de série après 3 refus 1020 a été **supprimé** : plus aucune visite n'est annulée par le bot. Un blocage est consigné visite par visite, et la série continue jusqu'au dernier clic prévu.
+
+Quand une visite est bloquée, elle est en plus **réessayée sur plusieurs IP différentes** avant d'être marquée en échec : `INSTAVA_PROXY_ATTEMPTS` (3 par défaut). Chaque tentative passe par un proxy distinct de la liste, et le message final est celui de la dernière tentative.
+
+```yaml
+environment:
+  INSTAVA_TICK_MS: "1000"          # cadence de la boucle
+  INSTAVA_GOAL_GAP_MS: "0"         # écart entre visites d'une série (0 = aucune)
+  INSTAVA_PROXY_ATTEMPTS: "3"      # IP essayées sur une visite bloquée
+  INSTAVA_PAGE_STABLE_MS: "700"    # observation après chargement
+```
+
+À noter : la vitesse ne change rien au *verdict* d'un site qui refuse l'IP (règle 1). Elle garantit que chaque tentative prévue a bien lieu, et qu'elle n'attend pas un minuteur pour démarrer.
+
 ### Ce que le bot fait sur les règles 1, 3 et 5
 
 Tous les contrôles ne se valent pas. Voici ce qui est réellement traité, et ce qui ne peut pas l'être.

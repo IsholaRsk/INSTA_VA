@@ -54,7 +54,7 @@ export function createScheduler({ store, config, log = () => {} }) {
     for (const visit of due) {
       // En mode objectif, la série s'enchaîne avec une pause courte ; en
       // intervalle, l'écart minimum de 5 minutes s'applique entre deux clics.
-      const gap = gapForTarget(visit.mode);
+      const gap = gapForTarget(visit.mode, { goalGapMs: config.goalGapMs });
       if (now - (lastCycleAt.get(visit.target_id) || 0) < gap) continue;
 
       if (!plannedByTarget.has(visit.target_id)) {
