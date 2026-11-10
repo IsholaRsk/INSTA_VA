@@ -50,9 +50,18 @@ export function plannedCountForDay(scheduledAts, timeZone, day) {
 
 export { DAY_MS, dayKeyIn };
 
-/** Écart entre deux clics : 5 minutes en intervalle, pause courte en objectif. */
-export function gapForTarget(mode, random = Math.random) {
+/**
+ * Écart entre deux clics d'une même cible.
+ *
+ * Mode intervalle : 5 minutes, c'est la règle du calendrier.
+ * Mode objectif : la série s'enchaîne. L'écart est réglable
+ * (INSTAVA_GOAL_GAP_MS) ; il vaut 0 par défaut, donc l'enchaînement est
+ * immédiat — la boucle du bot n'ajoute aucune attente de son côté.
+ */
+export function gapForTarget(mode, { random = Math.random, goalGapMs = 0 } = {}) {
   if (mode !== 'goal') return MIN_GAP_MS;
-  // 1,5 à 3,5 s entre deux visites d'une même série, pour rester crédible.
-  return Math.round(1500 + random() * 2000);
+  const base = Math.max(0, Number(goalGapMs) || 0);
+  if (!base) return 0;
+  // Un peu de variation évite une cadence parfaitement mécanique.
+  return Math.round(base * (0.75 + random() * 0.5));
 }

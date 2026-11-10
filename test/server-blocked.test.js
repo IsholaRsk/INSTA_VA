@@ -106,8 +106,8 @@ test('un refus pare-feu n’impute rien au proxy : la liste reste intacte', asyn
     const deadline = Date.now() + 30000;
     while (Date.now() < deadline) {
       const seen = ctx.store.listVisits(user.id);
-      if (seen.some((visit) => visit.status === 'cancelled')) break;
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      if (seen.every((visit) => visit.status !== 'pending' && visit.status !== 'running')) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
     await worker.stop();
 
@@ -116,11 +116,59 @@ test('un refus pare-feu n’impute rien au proxy : la liste reste intacte', asyn
     assert.equal(proxies[0].consecutive_failures, 0, 'aucun échec imputé au proxy');
 
     const visits = ctx.store.listVisits(user.id);
+    // Plus d'arrêt de série : les quatre visites sont tentées, aucune annulée.
     const cancelled = visits.filter((visit) => visit.status === 'cancelled');
-    assert.ok(cancelled.length >= 1, 'la série est arrêtée au lieu d’être rejouée jusqu’à 288 fois');
+    assert.equal(cancelled.length, 0, 'aucune visite n’est annulée sur un refus du site');
     const failed = visits.filter((visit) => visit.status === 'failed');
-    assert.ok(failed.length <= 3, `au plus trois tentatives (${failed.length})`);
+    assert.equal(failed.length, 4, `les quatre visites sont tentées (${failed.length})`);
     assert.match(failed[0].result.message, /1020/);
+  } finally {
+    ctx.db.close();
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
+test('une visite bloquée est réessayée sur plusieurs IP avant d’abandonner', async () => {
+  const ctx = await startEngine();
+  try {
+    const { parseProxyImport, proxyRow } = await import('../server/proxies.js');
+    const { randomUUID } = await import('node:crypto');
+    const user = ctx.store.createUser({ email: 'retry@exemple.test', passwordHash: 'x', role: 'owner' });
+    const lines = ['a', 'b', 'c'].map((name, index) => `${name}.exemple.fr:90${index}0:identifiantfictif:motdepassefictif`);
+    const parsed = parseProxyImport(lines.join('\n'));
+    ctx.store.insertProxies(user.id, parsed.entries.map((entry) => proxyRow(entry, ctx.config.secretKey, randomUUID(), entry.host)));
+    ctx.store.saveProxyState(user.id, { enabled: true, rotation: 'order' });
+
+    const target = ctx.store.createTarget(user.id, {
+      pseudo: 'Cible', url: 'https://exemple.fr', link_label: '', mode: 'goal',
+      execution_target: 1, duration_days: 1, effective_total: 1, daily_minimum: 0,
+    });
+    const run = ctx.store.createRun(user.id, { confirmClicks: false, targetSnapshot: {} });
+    ctx.store.addVisits([{ id: 'retry-1', run_id: run.id, user_id: user.id, target_id: target.id,
+      pseudo_snapshot: 'Cible', visit_number: 1, scheduled_at: new Date(Date.now() - 60_000).toISOString() }]);
+
+    const hosts = [];
+    const { worker } = createApp({
+      config: { ...ctx.config, proxyAttempts: 3 }, store: ctx.store, logger: silentLogger, startWorker: false,
+      openBrowser: async () => ({ close: async () => {} }),
+      runCycle: async ({ proxy }) => {
+        hosts.push(proxy?.host || 'direct');
+        throw new ChallengeError({ kind: 'cloudflare' }, 403);
+      },
+    });
+
+    worker.start();
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      const [visit] = ctx.store.listVisits(user.id);
+      if (visit.status === 'failed') break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    await worker.stop();
+
+    assert.equal(hosts.length, 3, `trois tentatives (${hosts.length})`);
+    assert.equal(new Set(hosts).size, 3, 'chaque tentative passe par une IP différente');
+    assert.equal(ctx.store.listVisits(user.id)[0].status, 'failed');
   } finally {
     ctx.db.close();
     rmSync(ctx.dir, { recursive: true, force: true });

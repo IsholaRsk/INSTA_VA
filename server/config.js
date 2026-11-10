@@ -40,6 +40,12 @@ function resolveSecretKey(dataDir) {
   return { key: generated, source: 'generated' };
 }
 
+/**
+ * Une variable d'environnement vide (ou absente) doit retomber sur la valeur
+ * par défaut : sans cela, `INSTAVA_TICK_MS:` laissé vide dans un compose
+ * donnerait `Number('') === 0`, rejeté par la borne minimale, donc le défaut.
+ * Ce cas est déjà juste ; on documente la raison d'être des bornes.
+ */
 function resolveTimeZone(value) {
   const candidate = String(value || '').trim() || 'Africa/Porto-Novo';
   try {
@@ -78,11 +84,20 @@ export function loadConfig(env = process.env) {
     signupCode: String(env.INSTAVA_SIGNUP_CODE || '').trim(),
     chromiumPath: String(env.CHROMIUM_PATH || '').trim() || null,
     headless: readFlag(env.INSTAVA_HEADLESS, true),
-    tickMs: readInteger(env.INSTAVA_TICK_MS, 5000, { min: 1000, max: 120000 }),
+    // Cadence de la boucle : c'est elle qui décide à quelle vitesse une visite
+    // due (ou une place libérée) est réellement lancée. 1 s au lieu de 5 s ne
+    // change rien à la crédibilité côté site, mais divise par cinq l'attente.
+    tickMs: readInteger(env.INSTAVA_TICK_MS, 1000, { min: 250, max: 120000 }),
     maxConcurrentCycles: readInteger(env.INSTAVA_CONCURRENCY, 2, { min: 1, max: 8 }),
     navigationTimeoutMs: readInteger(env.INSTAVA_NAVIGATION_TIMEOUT_MS, 45000, { min: 5000, max: 120000 }),
     // Temps laissé à un challenge Cloudflare pour se résoudre tout seul.
     challengeWaitMs: readInteger(env.INSTAVA_CHALLENGE_WAIT_MS, 15000, { min: 0, max: 60000 }),
+    // Écart entre deux visites d'une même cible, en mode objectif. À 0, la
+    // série s'enchaîne sans temps mort ; les autres modes gardent leur écart.
+    goalGapMs: readInteger(env.INSTAVA_GOAL_GAP_MS, 0, { min: 0, max: 60000 }),
+    // Nombre d'IP distinctes essayées sur une même visite quand le site bloque.
+    // 1 = une seule tentative, 0 = ne jamais retenter (déconseillé).
+    proxyAttempts: readInteger(env.INSTAVA_PROXY_ATTEMPTS, 3, { min: 0, max: 10 }),
     // Délai d'un test de proxy depuis l'interface (IP de sortie).
     proxyTestTimeoutMs: readInteger(env.INSTAVA_PROXY_TEST_TIMEOUT_MS, 8000, { min: 1000, max: 30000 }),
     logLevel: String(env.INSTAVA_LOG_LEVEL || 'info').trim().toLowerCase(),

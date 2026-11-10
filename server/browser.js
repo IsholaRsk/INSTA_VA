@@ -5,7 +5,13 @@ import { contextProfile, stealthInitScript, STEALTH_ARGS } from './stealth.js';
 export const CLICKABLE_SELECTOR = 'a[href], [role="link"], button, input[type="button"], input[type="submit"], [role="button"], summary';
 
 const NAVIGATION_TIMEOUT = 45000;
-const PAGE_STABLE_MS = 1800;
+// Temps d'observation après un chargement. 1800 ms à chaque visite coûtait
+// près de deux secondes par cycle sans rien apporter : la stabilité d'URL et
+// `readyState` suffisent à décider que la page est posée. Réglable via
+// INSTAVA_PAGE_STABLE_MS pour les sites très lents.
+const PAGE_STABLE_MS = Number(process.env.INSTAVA_PAGE_STABLE_MS) > 0
+  ? Number(process.env.INSTAVA_PAGE_STABLE_MS)
+  : 700;
 const REDIRECT_TIMEOUT = 25000;
 
 async function loadPlaywright() {
