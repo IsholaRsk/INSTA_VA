@@ -71,6 +71,7 @@ L’extension MV3 ne s’installe pas dans Chrome mobile. Pour piloter le bot de
 - **Comptes** : inscription locale, mots de passe hachés avec **scrypt**, sessions opaques en cookie `HttpOnly`/`SameSite=Strict`/`Secure`, dont seul le SHA-256 est stocké.
 - **Proxy** : identifiants Webshare obligatoires pour activer le proxy, chiffrés **AES-256-GCM** sur le disque, jamais renvoyés au navigateur ni journalisés.
 - **Sécurité réseau** : chaque URL chargée (navigation, sous-ressources, destination du clic) est vérifiée ; les adresses privées et locales sont bloquées en permanence.
+- **Sites protégés** : User-Agent et *client hints* alignés sur la version réelle du moteur, `navigator.webdriver` neutralisé, attente du challenge Cloudflare (15 s) et repli automatique par proxy. Voir le chapitre 8 bis de [DEPLOY.md](DEPLOY.md).
 
 ### L’application mobile
 

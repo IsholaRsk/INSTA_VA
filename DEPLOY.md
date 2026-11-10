@@ -341,6 +341,34 @@ En Docker : arrête la pile, restaure dans le volume avec `docker compose cp`, r
 
 ---
 
+## 8 bis. Sites protégés par Cloudflare
+
+Beaucoup de sites à clics sont derrière Cloudflare. Un navigateur automatisé y reçoit une page **« Just a moment… »** au lieu du site. Trois niveaux de réponse sont déjà en place :
+
+1. **Empreinte cohérente** — l'User-Agent annonce la version réelle du moteur (et non une version périmée, écart qui suffit à déclencher un challenge), les *client hints* concordent, l'empreinte de bureau est réaliste (1366×768, fr-FR, fuseau de Cotonou), et `navigator.webdriver` est neutralisé avant le premier script de la page.
+2. **Attente du challenge** — le bot laisse jusqu'à `INSTAVA_CHALLENGE_WAIT_MS` (15 s) à la vérification pour se résoudre seule, comme le ferait un visiteur. Beaucoup de challenges « managed » passent sans intervention.
+3. **Repli par proxy** — si le blocage persiste alors que la connexion était directe et qu'un proxy est configuré, le cycle est **rejoué une fois via le proxy**, qui présente une autre adresse IP.
+
+### Si le blocage persiste
+
+La cause dominante n'est alors plus le navigateur mais **la réputation de l'IP**. Une IP de datacenter (OVH, Hetzner, Scaleway…) est massivement utilisée par des robots : Cloudflare la traite en conséquence. Dans ce cas :
+
+- **Configure un proxy résidentiel** dans l'onglet *Webshare* de l'application. C'est la solution qui marche réellement pour ce type de site.
+- Évite les proxys de datacenter dans la mesure du possible : ils sont aussi mal notés que l'IP du VPS.
+- Un challenge peut rester **insoluble** si le site exige un CAPTCHA interactif : aucun robot ne peut passer une case à cocher cliquée par un humain. Le bot s'arrête alors proprement et l'indique, sans consommer le quota.
+
+Le journal affiche dans ce cas :
+
+```
+✗ Boutique — Le site affiche une page de vérification Cloudflare (HTTP 403)
+  au lieu de la page réelle : il bloque le navigateur du VPS.
+  Essaie avec un proxy résidentiel Webshare, ou depuis une IP moins exposée.
+```
+
+Ce cycle **n'est pas compté** dans les clics du jour, puisque le site n'a jamais été atteint.
+
+> ⚠️ Le contournement d'une protection anti-bot peut violer les conditions d'utilisation du site visé. Ce réglage sert à rendre le bot présentable (empreinte cohérente, comportement humain), pas à casser une protection. À toi de vérifier que l'usage prévu est autorisé.
+
 ## 9. Dépannage
 
 | Symptôme | Cause probable | Solution |
@@ -351,6 +379,7 @@ En Docker : arrête la pile, restaure dans le volume avec `docker compose cp`, r
 | « Aucun lien ou bouton visible ne correspond » | Libellé différent sur la page | Utilise le texte affiché exact ; vide le champ pour laisser le bot choisir |
 | « Plusieurs éléments correspondent » | Libellé ambigu | Précise le texte (accents, casse ignorés, mais le libellé doit être unique) |
 | Les cycles ne partent plus | Écart de 5 minutes non écoulé, ou quota du jour atteint | Vérifie **Clics du jour** : 288 max par jour et par cible |
+| « Page de vérification Cloudflare » | IP de datacenter mal notée, ou navigateur détecté | Chapitre **8 bis** : configure un proxy résidentiel Webshare |
 | Session expirée sans cesse | Cookie `Secure` en HTTP | `INSTAVA_SECURE_COOKIES=false` (uniquement en réseau privé HTTP) |
 | Page blanche après mise à jour | Service worker en cache | Recharge en forçant (Safari : appui long sur ⟳), ou réinstalle la PWA |
 

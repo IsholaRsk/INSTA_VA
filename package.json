@@ -10,7 +10,7 @@
     "start": "node server/index.js",
     "dev": "INSTAVA_LOG_LEVEL=debug node --watch server/index.js",
     "test": "node --test",
-    "check": "node --check server/index.js && node --check server/app.js && node --check server/auth.js && node --check server/browser.js && node --check server/config.js && node --check server/crypto.js && node --check server/db.js && node --check server/errors.js && node --check server/http.js && node --check server/logger.js && node --check server/net-safety.js && node --check server/ratelimit.js && node --check server/schedule.js && node --check server/scheduler.js && node --check server/store.js && node --check server/targets.js && node --check server/time.js && node --check server/worker.js && node --check public/app.js && node --check public/sw.js && node --check extension/bot-utils.js",
+    "check": "node --check server/index.js && node --check server/app.js && node --check server/auth.js && node --check server/browser.js && node --check server/challenge.js && node --check server/config.js && node --check server/crypto.js && node --check server/db.js && node --check server/errors.js && node --check server/http.js && node --check server/logger.js && node --check server/net-safety.js && node --check server/ratelimit.js && node --check server/schedule.js && node --check server/scheduler.js && node --check server/stealth.js && node --check server/store.js && node --check server/targets.js && node --check server/time.js && node --check server/worker.js && node --check public/app.js && node --check public/sw.js && node --check extension/bot-utils.js",
     "deploy:check": "docker compose config --quiet"
   },
   "dependencies": {

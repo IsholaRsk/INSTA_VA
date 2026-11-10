@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { dayKeyIn } from './time.js';
+import { ChallengeError } from './browser.js';
 
 const LAUNCH_ERROR_RE = /Executable doesn\u2019t exist|Executable doesn't exist|Failed to launch|browserType\.launch/i;
 
@@ -9,6 +10,12 @@ const LAUNCH_ERROR_RE = /Executable doesn\u2019t exist|Executable doesn't exist|
  */
 export function friendlyCycleError(error) {
   const raw = String(error?.message || 'Échec du cycle.');
+  if (error instanceof ChallengeError || error?.name === 'ChallengeError') {
+    const status = error.httpStatus ? ` (HTTP ${error.httpStatus})` : '';
+    return `Le site affiche une page de vérification Cloudflare${status} au lieu de la page réelle : `
+      + 'il bloque le navigateur du VPS. Essaie avec un proxy résidentiel Webshare, '
+      + 'ou depuis une IP moins exposée.';
+  }
   if (LAUNCH_ERROR_RE.test(raw)) {
     return 'Chromium n’est pas installé ou ne démarre pas sur le VPS. Lancez « npx playwright install --with-deps chromium » (ou reconstruisez l’image Docker).';
   }
@@ -102,13 +109,33 @@ export function createWorker({
 
     try {
       const browser = await getBrowser();
-      const result = await runCycle({
-        browser,
-        url: target.url,
-        linkLabel: target.link_label,
-        proxy,
-        navigationTimeout: config.navigationTimeoutMs,
-      });
+      let result;
+      try {
+        result = await runCycle({
+          browser,
+          url: target.url,
+          linkLabel: target.link_label,
+          proxy,
+          navigationTimeout: config.navigationTimeoutMs,
+          challengeWaitMs: config.challengeWaitMs,
+        });
+      } catch (error) {
+        // Blocage anti-bot alors que la connexion était directe : on rejoue
+        // une fois via le proxy configuré, qui présente une autre adresse IP.
+        const blocked = error instanceof ChallengeError || error?.name === 'ChallengeError';
+        if (!blocked || proxy) throw error;
+        const fallback = decryptProxy(visit.user_id);
+        if (!fallback) throw error;
+        logger.info(`↻ ${target.pseudo} — blocage direct, nouvel essai via le proxy ${fallback.host}.`);
+        result = await runCycle({
+          browser,
+          url: target.url,
+          linkLabel: target.link_label,
+          proxy: fallback,
+          navigationTimeout: config.navigationTimeoutMs,
+          challengeWaitMs: config.challengeWaitMs,
+        });
+      }
       store.finishVisit(visit.id, 'success', result);
       // Le clic réussi alimente le journal quotidien (quota de 100 clics/jour).
       store.addClick(visit.user_id, target.id, dayKeyIn(config.timeZone), 1);
