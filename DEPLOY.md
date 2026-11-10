@@ -395,6 +395,37 @@ Sur un refus définitif :
 
 Aucun réglage ne fait passer un 1020 : c'est une décision du site, prise avant tout chargement de page. Seul un proxy résidentiel — et parfois rien — change le résultat.
 
+### Sur quels critères Cloudflare te refuse
+
+L'erreur 1020 n'est pas une loterie : c'est une **règle écrite par le propriétaire du site**. La requête franchit plusieurs contrôles, dans un ordre précis, et le premier qui échoue suffit :
+
+| Ordre | Contrôle | Ce qui est examiné |
+|---|---|---|
+| 1 | **IP et ASN** | L'adresse de sortie et le réseau qui la possède. Une IP d'OVH, Hetzner, Amazon ou DigitalOcean est identifiée comme un serveur, pas comme un abonné. |
+| 2 | **Réputation de l'IP** | L'historique de cette adresse chez Cloudflare : si elle a servi à du spam ou du scraping, son score de menace est mauvais — même si toi tu l'utilises proprement. |
+| 3 | **Empreinte TLS (JA3/JA4)** | La négociation chiffrée doit ressembler à celle d'un vrai Chrome. C'est vérifié **avant** le moindre en-tête HTTP. |
+| 4 | **En-têtes et empreinte navigateur** | User-Agent, *client hints*, cohérence avec le système annoncé, `navigator.webdriver`. Le bot les aligne sur le moteur réel. |
+| 5 | **Cookies et comportement** | Cookie de clearance, rythme des requêtes, parcours de navigation. |
+
+Deux conséquences concrètes :
+
+- **Le critère 1 passe avant tout le reste.** Une IP d'hébergeur est refusée quelle que soit la qualité de ton navigateur. Soigner l'empreinte (critères 3 et 4) est utile, mais ne compense jamais une IP mal classée.
+- **Une 1020 est déterministe.** Ce n'est pas un score qui monte et descend : la règle s'applique ou non. Attendre, réessayer ou changer l'ordre des clics n'y change rien.
+
+**Le bouton Tester te donne désormais ce verdict.** Après un test, chaque proxy affiche la nature de son IP de sortie : `Datacenter · OVH (AS16276)`, `Résidentiel · Free SAS`, ou `Nature d’IP inconnue`. Le compte rendu global indique combien de tes proxys sortent par un hébergeur — s'ils le font tous, la question n'est plus « combien de proxys » mais « quel type de proxys ».
+
+### Ce que le bot fait sur les règles 1, 3 et 5
+
+Tous les contrôles ne se valent pas. Voici ce qui est réellement traité, et ce qui ne peut pas l'être.
+
+**Règle 1 — IP et réseau.** C'est le contrôle décisif, et le seul sur lequel l'application peut agir en changeant d'adresse. Depuis le test des proxys, la nature de chaque IP est mémorisée (`Datacenter · OVH`, `Résidentiel · Free SAS`). **La rotation donne alors la priorité aux proxys résidentiels** : ils passent avant toute la liste d'hébergeurs. Si aucun résidentiel n'est connu, la liste complète reste utilisée — mieux vaut tenter une IP datacenter que ne rien faire.
+
+**Règle 3 — empreinte TLS.** L'empreinte TLS (JA3/JA4) et HTTP/2 est produite par le moteur Chromium lui-même. Le bot pilote un **vrai Chrome via Playwright**, donc cette empreinte est celle d'un vrai navigateur : c'est la bonne réponse, et aucun réglage applicatif ne peut l'améliorer. L'argument `--disable-features=IsolateOrigins,site-per-process`, qui désactivait des protections par site de Chrome et constituait un signal d'automatisation, a été retiré. Le panneau **Sur quoi je suis jugé** vérifie la cohérence de la surface exposée à la page (version User-Agent alignée sur les client hints, plateforme, `navigator.webdriver`, viewport, langue, fuseau).
+
+**Règle 5 — cookies et comportement.** Les cookies de chaque cible sont désormais **conservés entre les visites** : le second passage arrive avec le cookie de clearance du premier, au lieu de repartir de zéro à chaque fois. Seuls les cookies du domaine visité sont gardés. Tu peux voir et effacer ces sessions depuis le panneau de diagnostic (**Effacer les sessions conservées**).
+
+**Règle 2 — réputation.** Rien dans l'application ne peut la modifier : elle dépend de l'historique de l'adresse chez Cloudflare, y compris l'usage qu'en ont fait d'autres avant toi. C'est la raison de préférer des IP résidentielles peu partagées.
+
 ### Si le blocage persiste
 
 La cause dominante n'est alors plus le navigateur mais **la réputation de l'IP**. Une IP de datacenter (OVH, Hetzner, Scaleway…) est massivement utilisée par des robots : Cloudflare la traite en conséquence. Dans ce cas :

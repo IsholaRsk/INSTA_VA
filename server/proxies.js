@@ -75,8 +75,21 @@ export function decryptProxyRow(row, secretKey) {
 export function nextProxy(store, userId, { random = Math.random } = {}) {
   const state = store.getProxyState(userId);
   if (!state.enabled) return null;
-  const candidates = store.listProxies(userId).filter((proxy) => proxy.enabled);
-  if (!candidates.length) return null;
+  const all = store.listProxies(userId).filter((proxy) => proxy.enabled);
+  if (!all.length) return null;
+
+  // Règle 1 : Cloudflare juge d'abord le réseau de l'IP. Un proxy résidentiel
+  // passé le test a donc la priorité sur toute la liste d'hébergeurs. Si aucun
+  // n'a été identifié comme résidentiel, on garde la liste complète : mieux
+  // vaut tenter une IP datacenter que ne rien faire du tout.
+  const known = all.filter((proxy) => proxy.ip_kind);
+  const residential = known.filter((proxy) => proxy.ip_kind === 'residential');
+  const untested = all.filter((proxy) => !proxy.ip_kind);
+  let candidates = all;
+  if (residential.length) {
+    // Les IP non testées restent éligibles : elles peuvent être résidentielles.
+    candidates = [...residential, ...untested];
+  }
 
   // En mode aléatoire, on écarte le proxy du cycle précédent : deux visites de
   // suite depuis la même IP, c'est exactement ce que la rotation doit éviter.
@@ -119,6 +132,118 @@ export function assertProxyLimit(count) {
  * si le proxy ou les identifiants ne fonctionnent pas.
  */
 // Les erreurs système remontent en anglais (`read ECONNRESET`) : on les traduit pour l'interface.
+/**
+ * Classification d'une IP de sortie : hébergement (datacenter) ou accès
+ * grand public. C'est le critère qui décide, avant tout le reste, du sort
+ * d'une requête devant Cloudflare — et c'est celui que l'utilisateur ne voit
+ * nulle part aujourd'hui.
+ *
+ * La classification s'appuie sur l'ASN (le réseau propriétaire de l'adresse),
+ * pas sur le nom de domaine : `proxy1.webshare.io` ne dit rien, `AS16276 OVH`
+ * dit tout. Deux services interrogés en cascade, réponse mise en cache.
+ */
+// ASN des hébergeurs et fournisseurs de cloud qui vendent massivement du proxy
+// « datacenter » : Webshare, Oxylabs, Smartproxy, IPRoyal… y logent leurs IP.
+const DATACENTER_ASNS = new Map([
+  [16276, 'OVH'], [12876, 'Scaleway'], [51167, 'Contabo'], [24940, 'Hetzner'],
+  [197540, 'Netcup'], [8560, 'IONOS'], [20773, 'Host Europe'], [34011, 'Host Europe'],
+  [16509, 'Amazon AWS'], [14618, 'Amazon AWS'], [15169, 'Google'], [396982, 'Google Cloud'],
+  [8075, 'Microsoft Azure'], [8068, 'Microsoft'], [14061, 'DigitalOcean'],
+  [63949, 'Linode / Akamai'], [20473, 'Vultr / Choopa'], [26347, 'DreamHost'],
+  [46606, 'Unified Layer'], [26496, 'GoDaddy'], [32244, 'Liquid Web'],
+  [9009, 'M247'], [51852, 'Private Layer'], [62240, 'Clouvider'],
+  [41378, 'Kirino'], [199524, 'G-Core Labs'], [13335, 'Cloudflare'],
+  [9002, 'RETN'], [202425, 'IP Volume'], [209854, 'Zenlayer'], [45090, 'Tencent'],
+  [55990, 'Huawei Cloud'], [37963, 'Alibaba Cloud'], [45102, 'Alibaba Cloud'],
+  [47890, 'Unmanaged Ltd'], [200373, 'Ipxo'], [208091, 'Hostinger'],
+  [47583, 'Hostinger'], [34241, 'Patchstack'], [60117, 'VSHosting'],
+]);
+
+const ASN_SERVICES = [
+  {
+    name: 'ipinfo',
+    request: (ip) => ({ url: `https://ipinfo.io/${encodeURIComponent(ip)}/json` }),
+    read: (data) => {
+      const org = String(data?.org || '');
+      const match = /^AS(\d+)\s+(.*)$/i.exec(org.trim());
+      if (match) return { asn: Number(match[1]), org: match[2] };
+      // Réponse sans AS : on garde au moins l'organisation pour l'affichage.
+      return org ? { asn: null, org } : null;
+    },
+  },
+  {
+    name: 'ipwho',
+    request: (ip) => ({ url: `https://ipwho.is/${encodeURIComponent(ip)}` }),
+    read: (data) => {
+      if (!data || data.success === false) return null;
+      const asn = Number(data?.connection?.asn);
+      const org = String(data?.connection?.org || data?.connection?.isp || '').trim();
+      if (!Number.isInteger(asn) && !org) return null;
+      return { asn: Number.isInteger(asn) ? asn : null, org };
+    },
+  },
+];
+
+const asnCache = new Map();
+const ASN_CACHE_MS = 6 * 60 * 60 * 1000;
+
+/** Vide le cache ASN (utile aux tests, ou après un changement de fournisseur). */
+export function clearAsnCache() {
+  asnCache.clear();
+}
+
+/** Classe une IP à partir de son numéro d'ASN et du nom de l'organisation. */
+export function classifyIp({ asn = null, org = '' } = {}) {
+  const normalizedOrg = String(org || '').trim();
+  const number = Number.isInteger(asn) ? asn : null;
+  if (number && DATACENTER_ASNS.has(number)) {
+    return { kind: 'datacenter', asn: number, org: normalizedOrg || DATACENTER_ASNS.get(number), provider: DATACENTER_ASNS.get(number) };
+  }
+  // Filet de sécurité : certains services ne donnent que le nom de l'hébergeur.
+  const hostingPattern = /(ovh|hetzner|scaleway|contabo|digitalocean|amazon|aws|google cloud|microsoft|azure|linode|akamai|vultr|hostinger|m247|cloudflare|alibaba|tencent|oracle|leaseweb|netcup|ionos)/i;
+  if (hostingPattern.test(normalizedOrg)) {
+    return { kind: 'datacenter', asn: number, org: normalizedOrg, provider: normalizedOrg };
+  }
+  return { kind: 'residential', asn: number, org: normalizedOrg, provider: null };
+}
+
+/** Interroge les services d'ASN avec repli et cache. Retourne null si aucun ne répond. */
+export async function lookupAsn(ip, { timeoutMs = 4000, fetchImpl = globalThis.fetch } = {}) {
+  const address = String(ip || '').trim();
+  if (!address) return null;
+
+  const cached = asnCache.get(address);
+  if (cached && cached.until > Date.now()) return cached.value;
+
+  for (const service of ASN_SERVICES) {
+    try {
+      const { url } = service.request(address);
+      const response = await fetchImpl(url, {
+        signal: AbortSignal.timeout(timeoutMs),
+        headers: { accept: 'application/json', 'user-agent': 'instava-bot/2' },
+      });
+      if (!response.ok) continue;
+      const info = service.read(await response.json());
+      if (!info) continue;
+      const value = { ...info, service: service.name };
+      asnCache.set(address, { value, until: Date.now() + ASN_CACHE_MS });
+      if (asnCache.size > 500) asnCache.clear();
+      return value;
+    } catch { /* service injoignable : on tente le suivant */ }
+  }
+  return null;
+}
+
+/**
+ * Enrichit une IP de sortie avec sa nature réseau. Ne lève jamais : le test
+ * d'un proxy doit rester utile même si l'annuaire ASN est injoignable.
+ */
+export async function describeExitIp(ip, options) {
+  const info = await lookupAsn(ip, options);
+  if (!info) return { ip, kind: 'unknown', asn: null, org: '', provider: null };
+  return { ip, ...classifyIp(info) };
+}
+
 export function friendlyProxyError(error) {
   // `error.message` d'abord : `String(new Error(''))` vaut « Error ».
   const message = String((error && typeof error === 'object' && 'message' in error ? error.message : error) || '').trim();

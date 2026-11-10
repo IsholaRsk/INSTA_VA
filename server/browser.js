@@ -211,11 +211,21 @@ export async function runCycle({
   proxy = null,
   navigationTimeout = NAVIGATION_TIMEOUT,
   challengeWaitMs = 12000,
+  // Cookies et stockage d'une visite précédente sur la même cible. Arriver
+  // avec le cookie de clearance évite de repasser un challenge déjà résolu.
+  storageState = null,
+  // Appelé à la fin du cycle avec l'état mis à jour (jamais bloquant).
+  onStorageState = null,
 }) {
   let context;
+  let savedState = null;
   try {
     const profile = contextProfile(browserVersionOf(browser));
-    context = await browser.newContext({ ...profile, proxy: proxyOption(proxy) });
+    context = await browser.newContext({
+      ...profile,
+      proxy: proxyOption(proxy),
+      ...(storageState ? { storageState } : {}),
+    });
     // Retire navigator.webdriver avant le premier script de la page.
     await context.addInitScript({ content: stealthInitScript() });
     const page = await context.newPage();
@@ -293,7 +303,15 @@ export async function runCycle({
       completed_at: new Date().toISOString(),
     };
   } finally {
-    if (context) await context.close().catch(() => {});
+    if (context) {
+      // Récupéré avant la fermeture : c'est ce qui donne un « déjà vu » au
+      // prochain cycle (règle 5). Un échec ici ne casse jamais le cycle.
+      try { savedState = await context.storageState(); } catch { savedState = null; }
+      await context.close().catch(() => {});
+    }
+    if (savedState && typeof onStorageState === 'function') {
+      try { onStorageState(savedState); } catch { /* jamais bloquant */ }
+    }
   }
 }
 

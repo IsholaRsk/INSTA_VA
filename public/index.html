@@ -180,6 +180,19 @@
           <div id="proxy-list" class="proxy-list"><div class="empty-state">Aucun proxy importé.</div></div>
         </section>
 
+        <section class="card section-card" aria-labelledby="diagnostic-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Contrôles du site</p><h2 id="diagnostic-title">Sur quoi je suis jugé</h2></div>
+            <span id="diagnostic-badge" class="status-badge status-neutral">—</span>
+          </div>
+          <p class="proxy-copy">Le site vérifie dans cet ordre : l’IP et son réseau, la réputation de cette IP, l’empreinte TLS, les en-têtes, puis les cookies et le comportement. Le premier contrôle qui échoue suffit à te refuser. Voici l’état réel de ton installation sur les points que le bot maîtrise.</p>
+          <div id="diagnostic-list" class="diagnostic-list"><div class="empty-state">Diagnostic non chargé.</div></div>
+          <div class="form-actions">
+            <button id="clear-sessions" class="button button-quiet" type="button">Effacer les sessions conservées</button>
+          </div>
+          <p id="diagnostic-message" class="form-message" aria-live="polite"></p>
+        </section>
+
         <section class="card section-card" aria-labelledby="journal-title">
           <div class="section-heading">
             <div><p class="eyebrow">Journal quotidien</p><h2 id="journal-title">Clics du jour</h2></div>

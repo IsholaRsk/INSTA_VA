@@ -537,6 +537,8 @@ async function startRun() {
 
 const proxyList = $('#proxy-list');
 let proxyRecords = [];
+// Résultats du dernier test : nature de l'IP de sortie par proxy.
+let proxyTestResults = new Map();
 let proxyState = null;
 let proxyTesting = false;
 
@@ -604,6 +606,17 @@ function renderProxies() {
     else if (proxy.consecutive_failures) tags.append(node('span', 'proxy-tag is-warn', `${proxy.consecutive_failures} échec(s) de suite`));
     const rate = proxyPercent(proxy);
     if (rate !== null) tags.append(node('span', 'proxy-tag', `${rate}% de réussite · ${proxy.cycles} cycle(s)`));
+    // Nature de l'IP de sortie, connue après le bouton Tester.
+    const tested = proxyTestResults.get(proxy.id);
+    if (tested?.ok && tested.ipKind) {
+      const labels = {
+        datacenter: `Datacenter${tested.provider ? ` · ${tested.provider}` : ''}${tested.asn ? ` (AS${tested.asn})` : ''}`,
+        residential: `Résidentiel${tested.org ? ` · ${tested.org}` : ''}`,
+        unknown: 'Nature d’IP inconnue',
+      };
+      tags.append(node('span', `proxy-tag is-${tested.ipKind === 'datacenter' ? 'warn' : 'good'}`, labels[tested.ipKind] || labels.unknown));
+      if (tested.exitIp) tags.append(node('span', 'proxy-tag is-muted', `IP ${tested.exitIp}`));
+    }
     tags.append(node('span', 'proxy-tag is-muted', formatRelative(proxy.last_used_at)));
     main.append(title, tags);
     if (proxy.last_error) main.append(node('p', 'proxy-error', `Dernière erreur : ${proxy.last_error}`));
@@ -785,12 +798,30 @@ async function testProxies(ids, button) {
       body: JSON.stringify(ids && ids.length ? { ids } : {}),
     });
     const results = data.results || [];
+    results.forEach((item) => proxyTestResults.set(item.id, item));
     const ok = results.filter((item) => item.ok).length;
     const failures = results.filter((item) => !item.ok).slice(0, 3)
       .map((item) => `${item.host}:${item.port} (${item.message})`).join(' ; ');
+
+    // Le point décisif : combien de ces proxys sortent par un hébergeur ?
+    const reachable = results.filter((item) => item.ok);
+    const datacenter = reachable.filter((item) => item.ipKind === 'datacenter').length;
+    const residential = reachable.filter((item) => item.ipKind === 'residential').length;
+    const unknown = reachable.filter((item) => item.ipKind === 'unknown').length;
+    let nature = '';
+    if (reachable.length) {
+      const parts = [];
+      if (datacenter) parts.push(`${datacenter} datacenter`);
+      if (residential) parts.push(`${residential} résidentiel(s)`);
+      if (unknown) parts.push(`${unknown} indéterminé(s)`);
+      nature = ` Nature des IP de sortie : ${parts.join(', ')}.`;
+      if (datacenter && !residential) {
+        nature += ' Tous sortent par un hébergeur : c’est exactement ce que Cloudflare refuse en premier.';
+      }
+    }
     setFormMessage(
       $('#proxy-message'),
-      `${ok} proxy(s) sur ${results.length} répondent.${failures ? ` Échecs : ${failures}.` : ''}`,
+      `${ok} proxy(s) sur ${results.length} répondent.${failures ? ` Échecs : ${failures}.` : ''}${nature}`,
       ok === results.length ? 'success' : 'error',
     );
     await loadProxyStatus();
@@ -830,6 +861,84 @@ async function removeProxy() {
   finally { button.disabled = false; }
 }
 
+
+/* ------------------------------- diagnostic ------------------------------- */
+
+async function loadDiagnostic() {
+  const list = $('#diagnostic-list');
+  const badge = $('#diagnostic-badge');
+  try {
+    const data = await apiRequest('/api/diagnostic');
+    const { fingerprint = {}, proxies = {}, rules = {}, sessions = 0 } = data;
+    const rows = [];
+
+    // 1. IP et réseau — le critère qui passe avant tout le reste.
+    const ipGood = proxies.priority;
+    rows.push({
+      step: '1', tone: ipGood ? 'good' : 'bad',
+      title: 'IP et réseau (ASN)',
+      text: proxies.total
+        ? `${proxies.residential} résidentiel(s), ${proxies.datacenter} datacenter, ${proxies.unknown} non testé(s). ${rules.ip || ''}`
+        : 'Aucun proxy importé : le site voit directement l’IP du VPS, qui appartient à un hébergeur.',
+    });
+
+    // 2. Réputation — subie, jamais contrôlable depuis l'application.
+    rows.push({
+      step: '2', tone: 'info',
+      title: 'Réputation de l’IP',
+      text: 'Dépend de l’historique de l’adresse chez Cloudflare, y compris l’usage qu’en ont fait d’autres avant toi. '
+        + 'Rien dans l’application ne peut la modifier : c’est la raison de préférer des IP résidentielles peu partagées.',
+    });
+
+    // 3. Empreinte TLS et 4. en-têtes — mesurées, corrigeables.
+    rows.push({
+      step: '3', tone: fingerprint.ok ? 'good' : 'bad',
+      title: 'Empreinte TLS et en-têtes',
+      text: fingerprint.ok
+        ? `Cohérente : User-Agent Chrome/${fingerprint.uaVersion || '?'} aligné sur les client hints, profil de bureau, marqueurs d’automatisation neutralisés. `
+          + (fingerprint.note || '')
+        : `Incohérence détectée : ${(fingerprint.issues || []).join(' ')}`,
+    });
+
+    // 5. Cookies et comportement.
+    rows.push({
+      step: '5', tone: sessions ? 'good' : 'info',
+      title: 'Cookies et comportement',
+      text: `${sessions} cible(s) avec cookies conservés. ${rules.cookies || ''} `
+        + 'Les cookies d’une visite précédente évitent de repasser un contrôle déjà résolu, et un rythme régulier pèse moins qu’une rafale.',
+    });
+
+    list.replaceChildren();
+    rows.forEach((row) => {
+      const item = node('div', `diagnostic-row is-${row.tone}`);
+      item.append(node('span', 'diagnostic-step', row.step));
+      const body = node('div', '');
+      body.append(node('strong', '', row.title), node('p', '', row.text));
+      item.append(body);
+      list.append(item);
+    });
+
+    const blocking = rows.filter((row) => row.tone === 'bad').length;
+    badge.textContent = blocking ? `${blocking} point(s) bloquant(s)` : 'Aucun point bloquant';
+    badge.className = blocking ? 'status-badge status-warning' : 'status-badge status-success';
+    $('#clear-sessions').classList.toggle('hidden', !sessions);
+  } catch (error) {
+    setFormMessage($('#diagnostic-message'), displayError(error), 'error');
+  }
+}
+
+async function clearSessions() {
+  const button = $('#clear-sessions');
+  button.disabled = true;
+  try {
+    const data = await apiRequest('/api/sessions?id=all', { method: 'DELETE' });
+    setFormMessage($('#diagnostic-message'), data.message || 'Sessions effacées.', 'success');
+    await loadDiagnostic();
+  } catch (error) {
+    setFormMessage($('#diagnostic-message'), displayError(error), 'error');
+  } finally { button.disabled = false; }
+}
+
 function showNotice(message, isError = false) {
   const notice = $('#notice');
   notice.textContent = message;
@@ -839,7 +948,7 @@ function showNotice(message, isError = false) {
 
 async function enterWorkspace() {
   showWorkspace();
-  await Promise.all([loadTargets(), loadProxyStatus(), loadActivity()]);
+  await Promise.all([loadTargets(), loadProxyStatus(), loadActivity(), loadDiagnostic()]);
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = setInterval(() => {
     if (document.visibilityState === 'visible') loadActivity();
@@ -869,6 +978,7 @@ async function boot() {
   $('#proxy-form').addEventListener('submit', saveProxy);
   $('#remove-proxy').addEventListener('click', removeProxy);
   $('#test-proxies').addEventListener('click', () => testProxies(null, $('#test-proxies')));
+  $('#clear-sessions').addEventListener('click', clearSessions);
   $('#proxy-enabled').addEventListener('change', saveProxyState);
   $('#proxy-rotation').addEventListener('change', saveProxyState);
 

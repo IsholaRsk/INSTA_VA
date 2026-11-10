@@ -56,6 +56,10 @@ export function publicProxy(row) {
     successes: Number(row.successes || 0),
     failures: Number(row.failures || 0),
     consecutive_failures: Number(row.consecutive_failures || 0),
+    ip_kind: row.ip_kind || null,
+    asn: row.asn === null || row.asn === undefined ? null : Number(row.asn),
+    org: row.org || null,
+    ip_checked_at: row.ip_checked_at || null,
     last_error: row.last_error || null,
     last_used_at: row.last_used_at || null,
     created_at: row.created_at,
@@ -432,6 +436,44 @@ export function createStore(db) {
           updated_at: ISO(),
         });
       return this.getProxyState(userId);
+    },
+
+    /** Enregistre la nature de l'IP de sortie d'un proxy (après un test). */
+    setProxyIpInfo(userId, proxyId, { ipKind = null, asn = null, org = null } = {}) {
+      stmt(`UPDATE proxies SET ip_kind = :ip_kind, asn = :asn, org = :org, ip_checked_at = :now
+            WHERE user_id = :user_id AND id = :id`).run({
+        ip_kind: ipKind, asn: asn === null ? null : Number(asn), org: org || null,
+        now: ISO(), user_id: userId, id: proxyId,
+      });
+      return this.getProxy(userId, proxyId);
+    },
+
+    /* ------------------------ sessions par cible --------------------------- */
+
+    getTargetSession(userId, targetId) {
+      const row = stmt('SELECT * FROM target_sessions WHERE user_id = ? AND target_id = ?').get(userId, targetId);
+      if (!row) return null;
+      try {
+        return { storage: JSON.parse(row.storage), cookieCount: Number(row.cookie_count || 0), updatedAt: row.updated_at };
+      } catch { return null; }
+    },
+
+    saveTargetSession(userId, targetId, storage, cookieCount = 0) {
+      stmt(`INSERT INTO target_sessions (target_id, user_id, storage, cookie_count, updated_at)
+            VALUES (:target_id, :user_id, :storage, :cookie_count, :updated_at)
+            ON CONFLICT (target_id) DO UPDATE SET
+              storage = excluded.storage, cookie_count = excluded.cookie_count, updated_at = excluded.updated_at`)
+        .run({ target_id: targetId, user_id: userId, storage: JSON.stringify(storage), cookie_count: cookieCount, updated_at: ISO() });
+    },
+
+    deleteTargetSession(userId, targetId) {
+      const info = stmt('DELETE FROM target_sessions WHERE user_id = ? AND target_id = ?').run(userId, targetId);
+      return Number(info.changes || 0);
+    },
+
+    listTargetSessions(userId) {
+      return stmt('SELECT target_id, cookie_count, updated_at FROM target_sessions WHERE user_id = ?').all(userId)
+        .map((row) => ({ targetId: row.target_id, cookieCount: Number(row.cookie_count || 0), updatedAt: row.updated_at }));
     },
 
     recordProxyOutcome(proxyId, { success, error = null, disableAfter = 3 }) {

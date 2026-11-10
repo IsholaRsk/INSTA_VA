@@ -9,6 +9,7 @@ import {
   assertProxyLimit,
   attachSecretKey,
   decryptProxyRow,
+  describeExitIp,
   MAX_PROXY_IMPORT_BYTES,
   MAX_PROXY_IMPORT_CHARS,
   nextProxy,
@@ -23,6 +24,8 @@ import { createStore, publicVisit } from './store.js';
 import { describePlan, MAX_TARGETS, planTarget, validateTargetInput } from './targets.js';
 import { dayKeyIn } from './time.js';
 import { createWorker } from './worker.js';
+import { contextProfile, engineVersionFrom, fingerprintFromProfile } from './stealth.js';
+import { readFileSync } from 'node:fs';
 
 // Limites par défaut ; injectables pour les tests et les déploiements partagés.
 export const LIMITS = {
@@ -44,6 +47,15 @@ export function createApp({
   limits = LIMITS,
 }) {
   const auth = createAuth({ store, config });
+
+  // Version du moteur Chromium annoncée par Playwright : elle sert au profil et
+  // au diagnostic d'empreinte, même quand aucun navigateur n'est lancé.
+  const engineVersion = (() => {
+    try {
+      const file = new URL('../node_modules/playwright-core/browsers.json', import.meta.url);
+      return engineVersionFrom(JSON.parse(readFileSync(file, 'utf8'))) || '';
+    } catch { return ''; }
+  })();
   // Un limiteur par instance : deux serveurs (ou deux tests) ne se bloquent pas.
   const loginLimiter = createRateLimiter(limits.login);
   const signupLimiter = createRateLimiter(limits.signup);
@@ -392,6 +404,64 @@ export function createApp({
     sendJson(res, 200, { ok: true });
   });
 
+  // Diagnostic des règles que l'utilisateur ne peut pas voir autrement :
+  // l'empreinte présentée au site (règle 3), les cookies conservés (règle 5)
+  // et la nature des IP disponibles (règle 1).
+  route('GET', '/api/diagnostic', (req, res, user) => {
+    const proxies = store.listProxies(user.id);
+    const byKind = proxies.reduce((acc, proxy) => {
+      const kind = proxy.ip_kind || 'unknown';
+      acc[kind] = (acc[kind] || 0) + 1;
+      return acc;
+    }, {});
+    // L'empreinte est calculée sur le profil appliqué au contexte. La version
+    // exacte du moteur n'est connue qu'après son lancement : sans navigateur
+    // ouvert, on présente le profil type (mêmes réglages, version courante).
+    const version = engineVersion;
+    const profile = contextProfile(version);
+    sendJson(res, 200, {
+      fingerprint: fingerprintFromProfile(profile, false),
+      proxies: {
+        total: proxies.length,
+        enabled: proxies.filter((proxy) => proxy.enabled).length,
+        datacenter: byKind.datacenter || 0,
+        residential: byKind.residential || 0,
+        unknown: byKind.unknown || 0,
+        priority: (byKind.residential || 0) > 0,
+      },
+      sessions: store.listTargetSessions(user.id).length,
+      rules: {
+        ip: (byKind.residential || 0) > 0
+          ? 'Au moins un proxy résidentiel connu : il passe en priorité.'
+          : 'Aucun proxy résidentiel identifié : lance le test des proxys pour connaître la nature de leurs IP.',
+        cookies: store.listTargetSessions(user.id).length
+          ? 'Les cookies de chaque cible sont conservés entre les visites.'
+          : 'Les cookies seront conservés dès le premier cycle réussi.',
+      },
+    });
+  });
+
+  // Sessions (cookies) conservées par cible : visibles et effaçables, pour que
+  // l'utilisateur garde la main sur ce qui est stocké en son nom.
+  route('GET', '/api/sessions', (req, res, user) => {
+    const sessions = store.listTargetSessions(user.id);
+    const byTarget = new Map(store.listTargets(user.id).map((target) => [target.id, target]));
+    sendJson(res, 200, {
+      sessions: sessions.map((session) => ({
+        ...session,
+        pseudo: byTarget.get(session.targetId)?.pseudo || 'Cible supprimée',
+      })),
+    });
+  });
+
+  route('DELETE', '/api/sessions', (req, res, user, session, url) => {
+    const id = url.searchParams.get('id') || 'all';
+    const removed = id === 'all'
+      ? store.listTargetSessions(user.id).reduce((sum, item) => sum + store.deleteTargetSession(user.id, item.targetId), 0)
+      : store.deleteTargetSession(user.id, id);
+    sendJson(res, 200, { removed, message: `${removed} session(s) supprimée(s).` });
+  });
+
   route('POST', '/api/proxies/test', async (req, res, user) => {
     const body = await readJsonBody(req);
     const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
@@ -404,9 +474,19 @@ export function createApp({
       const started = Date.now();
       try {
         const entry = decryptProxyRow(row, config.secretKey);
-        await probeProxy(entry, config.proxyTestTimeoutMs);
+        const probe = await probeProxy(entry, config.proxyTestTimeoutMs);
         store.recordProxyOutcome(row.id, { success: true, disableAfter: 999 });
-        results.push({ id: row.id, host: row.host, port: row.port, ok: true, latencyMs: Date.now() - started });
+        // Nature de l'IP de sortie : c'est elle qui décide du sort devant
+        // Cloudflare, bien plus que le fournisseur de proxy choisi.
+        const exit = await describeExitIp(probe.ip, { timeoutMs: Math.max(2500, config.proxyTestTimeoutMs) });
+        // Mémorisé : la rotation privilégiera les proxies résidentiels (règle 1).
+        store.setProxyIpInfo(row.user_id, row.id, { ipKind: exit.kind, asn: exit.asn, org: exit.org });
+        results.push({
+          id: row.id, host: row.host, port: row.port, ok: true,
+          latencyMs: Date.now() - started,
+          exitIp: exit.ip, ipKind: exit.kind, asn: exit.asn,
+          org: exit.org ? String(exit.org).slice(0, 80) : '', provider: exit.provider || '',
+        });
       } catch (error) {
         store.recordProxyOutcome(row.id, { success: false, error: error.message, disableAfter: 999 });
         results.push({ id: row.id, host: row.host, port: row.port, ok: false, message: String(error.message).slice(0, 160), latencyMs: Date.now() - started });

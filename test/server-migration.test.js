@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { openDatabase } from '../server/db.js';
+import { openDatabase, SCHEMA_VERSION } from '../server/db.js';
 import { createStore } from '../server/store.js';
 import { loadConfig } from '../server/config.js';
 import { parseProxyImport, proxyRow, nextProxy, attachSecretKey } from '../server/proxies.js';
@@ -15,11 +15,12 @@ function tempDir() {
   return { dir, file: path.join(dir, 'm.sqlite'), clean: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-test('migration : une base neuve arrive directement en schéma 2', () => {
+test('migration : une base neuve arrive directement au schéma courant', () => {
   const spot = tempDir();
   try {
     const db = openDatabase(spot.file);
-    assert.equal(db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get().value, '2');
+    // La version augmente à chaque migration : on vérifie qu'elle est à jour.
+    assert.equal(db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get().value, String(SCHEMA_VERSION));
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name);
     assert.ok(tables.includes('proxies'));
     assert.ok(tables.includes('proxy_state'));
@@ -44,7 +45,8 @@ test('migration : l’ancien proxy unique est repris dans la liste, sans perte',
     legacy.close();
 
     const db = openDatabase(spot.file);
-    assert.equal(db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get().value, '2');
+    // La version augmente à chaque migration : on vérifie qu'elle est à jour.
+    assert.equal(db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get().value, String(SCHEMA_VERSION));
     assert.equal(db.prepare("SELECT count(*) AS c FROM sqlite_master WHERE name = 'proxy_settings'").get().c, 0);
 
     const store = createStore(db);
