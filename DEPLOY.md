@@ -374,6 +374,23 @@ Ensuite :
 - **Décocher *Utiliser la rotation*** — revient à l'IP du VPS sans supprimer la liste.
 - Un proxy qui échoue trois fois de suite est **désactivé automatiquement** ; le bouton **Supprimer les proxys désactivés** nettoie la liste d'un coup.
 
+### Blocage franc (erreur 1020, « Sorry, you have been blocked »)
+
+Il faut distinguer deux pages Cloudflare, qui n'appellent pas la même conduite :
+
+| Page | Ce que c'est | Ce que fait le bot |
+|---|---|---|
+| « Just a moment… » / « Un instant… » | **Vérification en cours** | Il attend jusqu'à 15 s qu'elle se résolve seule. |
+| « Sorry, you have been blocked », `Error code: 1020` | **Refus définitif** | Il n'attend pas, signale le refus et arrête la série après 3 tentatives. |
+
+Sur un refus définitif :
+
+- le cycle **n'est pas imputé au proxy** — le site refuse l'accès en bloc, ce n'est pas ton proxy qui est en cause. Sans cette précaution, un site bloquant aurait désactivé tes 69 proxys en 69 cycles ;
+- la série est **arrêtée après trois refus consécutifs** au lieu d'être rejouée jusqu'à 288 fois dans la journée pour rien ;
+- le journal affiche le motif : *« page Cloudflare "Sorry, you have been blocked", erreur 1020 »*.
+
+Aucun réglage ne fait passer un 1020 : c'est une décision du site, prise avant tout chargement de page. Seul un proxy résidentiel — et parfois rien — change le résultat.
+
 ### Si le blocage persiste
 
 La cause dominante n'est alors plus le navigateur mais **la réputation de l'IP**. Une IP de datacenter (OVH, Hetzner, Scaleway…) est massivement utilisée par des robots : Cloudflare la traite en conséquence. Dans ce cas :

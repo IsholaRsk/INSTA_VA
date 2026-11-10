@@ -21,7 +21,9 @@ test('détecte les pages de vérification Cloudflare', () => {
   for (const snapshot of cases) {
     const result = detectChallengeSnapshot(snapshot);
     assert.ok(result, `non détecté : ${JSON.stringify(snapshot)}`);
-    assert.equal(result.kind, 'cloudflare');
+    // « Accès refusé / Attention Required » relèvent du blocage définitif :
+    // les deux sont des interceptions, seule la conduite à tenir diffère.
+    assert.ok(['cloudflare', 'blocked'].includes(result.kind), `type inattendu : ${result.kind}`);
     assert.ok(result.reason.length > 0);
   }
 });
