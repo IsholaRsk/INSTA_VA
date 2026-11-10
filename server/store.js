@@ -42,6 +42,26 @@ export function publicVisit(row) {
   };
 }
 
+export function publicProxy(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    label: row.label || '',
+    scheme: row.scheme,
+    host: row.host,
+    port: Number(row.port),
+    username: row.username_masked,
+    enabled: Boolean(row.enabled),
+    cycles: Number(row.cycles || 0),
+    successes: Number(row.successes || 0),
+    failures: Number(row.failures || 0),
+    consecutive_failures: Number(row.consecutive_failures || 0),
+    last_error: row.last_error || null,
+    last_used_at: row.last_used_at || null,
+    created_at: row.created_at,
+  };
+}
+
 export function publicRun(row) {
   if (!row) return null;
   return {
@@ -325,23 +345,115 @@ export function createStore(db) {
       return Number(info.changes || 0);
     },
 
-    /* --------------------------------- proxy ---------------------------------- */
-    getProxySettings(userId) {
-      return stmt('SELECT * FROM proxy_settings WHERE user_id = ?').get(userId) || null;
+    /* --------------------------------- proxys --------------------------------- */
+    listProxies(userId) {
+      return stmt('SELECT * FROM proxies WHERE user_id = ? ORDER BY created_at, host')
+        .all(userId).map(publicProxy);
     },
 
-    saveProxySettings(userId, data) {
-      stmt(`INSERT INTO proxy_settings (user_id, scheme, host, port, username_masked, secret_box, updated_at)
-            VALUES (:user_id, :scheme, :host, :port, :username_masked, :secret_box, :updated_at)
+    getProxy(userId, id) {
+      const row = stmt('SELECT * FROM proxies WHERE user_id = ? AND id = ?').get(userId, id);
+      return row ? publicProxy(row) : null;
+    },
+
+    /** Ligne interne (avec le secret chiffré), jamais exposée telle quelle. */
+    getProxyRow(userId, id) {
+      return stmt('SELECT * FROM proxies WHERE user_id = ? AND id = ?').get(userId, id) || null;
+    },
+
+    countProxies(userId) {
+      return Number(stmt('SELECT COUNT(*) AS total FROM proxies WHERE user_id = ?').get(userId).total);
+    },
+
+    insertProxies(userId, rows) {
+      const insert = stmt(`INSERT INTO proxies (id, user_id, label, scheme, host, port,
+              username_masked, secret_box, created_at)
+            VALUES (:id, :user_id, :label, :scheme, :host, :port,
+              :username_masked, :secret_box, :created_at)`);
+      const now = ISO();
+      db.exec('BEGIN');
+      try {
+        for (const row of rows) insert.run({ user_id: userId, created_at: now, label: '', ...row });
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+      return rows.length;
+    },
+
+    updateProxy(userId, id, data) {
+      const columns = Object.keys(data);
+      if (!columns.length) return this.getProxy(userId, id);
+      const assignments = columns.map((column) => `${column} = :${column}`).join(', ');
+      stmt(`UPDATE proxies SET ${assignments} WHERE user_id = :user_id AND id = :id`)
+        .run({ ...data, user_id: userId, id });
+      return this.getProxy(userId, id);
+    },
+
+    deleteProxy(userId, id) {
+      return Number(stmt('DELETE FROM proxies WHERE user_id = ? AND id = ?').run(userId, id).changes || 0) > 0;
+    },
+
+    deleteDisabledProxies(userId) {
+      return Number(stmt('DELETE FROM proxies WHERE user_id = ? AND enabled = 0').run(userId).changes || 0);
+    },
+
+    getProxyState(userId) {
+      const row = stmt('SELECT * FROM proxy_state WHERE user_id = ?').get(userId);
+      if (row) {
+        return {
+          enabled: Boolean(row.enabled),
+          rotation: row.rotation === 'random' ? 'random' : 'order',
+          cursor: Number(row.cursor || 0),
+          disableAfter: Number(row.disable_after || 3),
+          lastProxyId: row.last_proxy_id || null,
+        };
+      }
+      return { enabled: false, rotation: 'order', cursor: 0, disableAfter: 3, lastProxyId: null };
+    },
+
+    saveProxyState(userId, patch) {
+      const current = this.getProxyState(userId);
+      const next = { ...current, ...patch };
+      stmt(`INSERT INTO proxy_state (user_id, enabled, rotation, cursor, disable_after, last_proxy_id, updated_at)
+            VALUES (:user_id, :enabled, :rotation, :cursor, :disable_after, :last_proxy_id, :updated_at)
             ON CONFLICT (user_id) DO UPDATE SET
-              scheme = excluded.scheme, host = excluded.host, port = excluded.port,
-              username_masked = excluded.username_masked, secret_box = excluded.secret_box,
+              enabled = excluded.enabled, rotation = excluded.rotation, cursor = excluded.cursor,
+              disable_after = excluded.disable_after, last_proxy_id = excluded.last_proxy_id,
               updated_at = excluded.updated_at`)
-        .run({ user_id: userId, updated_at: ISO(), ...data });
+        .run({
+          user_id: userId,
+          enabled: next.enabled ? 1 : 0,
+          rotation: next.rotation === 'random' ? 'random' : 'order',
+          cursor: Math.max(0, Math.floor(Number(next.cursor) || 0)),
+          last_proxy_id: next.lastProxyId ? String(next.lastProxyId) : null,
+          disable_after: Math.min(20, Math.max(1, Math.floor(Number(next.disableAfter) || 3))),
+          updated_at: ISO(),
+        });
+      return this.getProxyState(userId);
     },
 
-    deleteProxySettings(userId) {
-      stmt('DELETE FROM proxy_settings WHERE user_id = ?').run(userId);
+    recordProxyOutcome(proxyId, { success, error = null, disableAfter = 3 }) {
+      const row = stmt('SELECT * FROM proxies WHERE id = ?').get(proxyId);
+      if (!row) return null;
+      const consecutive = success ? 0 : Number(row.consecutive_failures || 0) + 1;
+      // Un proxy qui échoue plusieurs fois de suite est écarté automatiquement.
+      const disable = Boolean(!success && consecutive >= disableAfter);
+      stmt(`UPDATE proxies SET cycles = cycles + 1,
+              successes = successes + :ok, failures = failures + :ko,
+              consecutive_failures = :consecutive, last_error = :last_error,
+              last_used_at = :now, enabled = :enabled
+            WHERE id = :id`).run({
+        ok: success ? 1 : 0,
+        ko: success ? 0 : 1,
+        consecutive,
+        last_error: error ? String(error).slice(0, 160) : null,
+        now: ISO(),
+        enabled: disable ? 0 : row.enabled,
+        id: proxyId,
+      });
+      return { disabled: disable, consecutive };
     },
 
     /* ----------------------------- maintenance -------------------------------- */

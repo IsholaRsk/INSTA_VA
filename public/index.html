@@ -127,37 +127,45 @@
 
         <section class="card section-card proxy-card" aria-labelledby="proxy-title">
           <div class="section-heading">
-            <div><p class="eyebrow">Réseau</p><h2 id="proxy-title">Webshare (facultatif)</h2></div>
-            <span id="proxy-badge" class="status-badge status-neutral">Non configuré</span>
+            <div><p class="eyebrow">Réseau</p><h2 id="proxy-title">Proxys et rotation</h2></div>
+            <span id="proxy-badge" class="status-badge status-neutral">Aucun proxy</span>
           </div>
-          <p class="proxy-copy">Le proxy s’applique à toute la visite du navigateur distant (URL, ressources, clic et redirection), jamais au téléphone. Webshare gère la rotation de son côté; vos identifiants sont chiffrés (AES-256-GCM) sur le VPS et ne sont jamais renvoyés au navigateur.</p>
+          <p class="proxy-copy">Collez votre liste de proxys (Webshare ou autre), une ligne par proxy : <code>hôte:port:identifiant:motdepasse</code>. Chaque cycle prend le proxy suivant de la liste, donc vos visites ne sortent jamais deux fois de suite par la même adresse IP. Les identifiants sont chiffrés (AES-256-GCM) sur le VPS et ne sont jamais renvoyés au navigateur. Attention : un proxy datacenter a souvent la même mauvaise réputation que l’IP du VPS face à Cloudflare — seul un proxy résidentel change réellement la donne.</p>
+
           <form id="proxy-form" class="form-grid">
+            <div class="field full-field">
+              <label for="proxy-text">Liste des proxys</label>
+              <textarea id="proxy-text" rows="6" spellcheck="false" maxlength="400000" placeholder="proxy1.webshare.io:8080:identifiant:motdepasse&#10;proxy2.webshare.io:8080:identifiant:motdepasse&#10;...&#10;&#10;Formats acceptés : hôte:port:identifiant:motdepasse · identifiant:motdepasse@hôte:port · socks5://identifiant:motdepasse@hôte:port · hôte:port"></textarea>
+            </div>
             <div class="field">
-              <label for="proxy-scheme">Type</label>
+              <label for="proxy-scheme">Type par défaut</label>
               <select id="proxy-scheme"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select>
             </div>
             <div class="field">
-              <label for="proxy-host">Hôte Webshare</label>
-              <input id="proxy-host" type="text" maxlength="253" autocomplete="off" placeholder="proxy.example.net">
+              <label for="proxy-username">Identifiant par défaut (si absent)</label>
+              <input id="proxy-username" type="text" maxlength="512" autocomplete="off" placeholder="facultatif">
             </div>
             <div class="field">
-              <label for="proxy-port">Port</label>
-              <input id="proxy-port" type="number" min="1" max="65535" inputmode="numeric" placeholder="8080">
+              <label for="proxy-password">Mot de passe par défaut (si absent)</label>
+              <input id="proxy-password" type="password" maxlength="512" autocomplete="new-password" placeholder="facultatif">
             </div>
             <div class="field">
-              <label for="proxy-username">Nom d’utilisateur</label>
-              <input id="proxy-username" type="text" maxlength="512" autocomplete="off" placeholder="Webshare username">
-            </div>
-            <div class="field full-field">
-              <label for="proxy-password">Mot de passe Webshare</label>
-              <input id="proxy-password" type="password" maxlength="512" autocomplete="new-password" placeholder="Saisi ici, jamais dans le chat">
+              <label for="proxy-rotation">Rotation</label>
+              <select id="proxy-rotation"><option value="order">Dans l’ordre de la liste</option><option value="random">Au hasard à chaque cycle</option></select>
             </div>
             <div class="form-actions full-field">
-              <button id="save-proxy" class="button button-secondary" type="submit">Enregistrer le proxy</button>
-              <button id="remove-proxy" class="button button-quiet hidden" type="button">Supprimer les identifiants</button>
+              <button id="save-proxy" class="button button-secondary" type="submit">Importer la liste</button>
+              <button id="test-proxies" class="button button-quiet" type="button">Tester les proxys actifs</button>
+              <button id="remove-proxy" class="button button-quiet hidden" type="button">Supprimer les proxys désactivés</button>
             </div>
           </form>
           <p id="proxy-message" class="form-message" aria-live="polite"></p>
+
+          <div class="proxy-toolbar">
+            <span id="proxy-summary" class="field-help">Aucun proxy importé.</span>
+            <label class="check-row proxy-switch"><input id="proxy-enabled" type="checkbox"><span><strong>Utiliser la rotation</strong><small>Décochez pour sortir par l’IP du VPS.</small></span></label>
+          </div>
+          <div id="proxy-list" class="proxy-list"><div class="empty-state">Aucun proxy importé.</div></div>
         </section>
 
         <section class="card section-card" aria-labelledby="journal-title">

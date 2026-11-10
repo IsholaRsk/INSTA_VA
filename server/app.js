@@ -1,11 +1,20 @@
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { createAuth } from './auth.js';
-import { constantTimeEqual, decryptSecret, encryptSecret, maskValue } from './crypto.js';
+import { constantTimeEqual, maskValue } from './crypto.js';
 import { HttpError, statusOf } from './errors.js';
 import { applySecurityHeaders, clientIp, readJsonBody, sendJson, sendText, serveStatic } from './http.js';
-import { validateProxyConfiguration } from './net-safety.js';
 import { createRateLimiter } from './ratelimit.js';
+import {
+  assertProxyLimit,
+  attachSecretKey,
+  decryptProxyRow,
+  nextProxy,
+  parseProxyImport,
+  probeProxy,
+  proxyRow,
+  validateProxyEntry,
+} from './proxies.js';
 import { buildVisitSchedule, clicksAllowedToday, plannedCountForDay } from './schedule.js';
 import { createScheduler } from './scheduler.js';
 import { createStore, publicVisit } from './store.js';
@@ -13,29 +22,52 @@ import { describePlan, MAX_TARGETS, planTarget, validateTargetInput } from './ta
 import { dayKeyIn } from './time.js';
 import { createWorker } from './worker.js';
 
-const loginLimiter = createRateLimiter({ windowMs: 15 * 60 * 1000, max: 10 });
-const signupLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 5 });
+// Limites par défaut ; injectables pour les tests et les déploiements partagés.
+export const LIMITS = {
+  login: { windowMs: 15 * 60 * 1000, max: 10 },
+  signup: { windowMs: 60 * 60 * 1000, max: 5 },
+};
 
 /**
  * Construit le serveur HTTP complet du bot autonome.
  * `deps` permet d'injecter un faux navigateur dans les tests.
  */
-export function createApp({ config, store, logger = console, openBrowser, runCycle, startWorker = true }) {
+export function createApp({
+  config,
+  store,
+  logger = console,
+  openBrowser,
+  runCycle,
+  startWorker = true,
+  limits = LIMITS,
+}) {
   const auth = createAuth({ store, config });
+  // Un limiteur par instance : deux serveurs (ou deux tests) ne se bloquent pas.
+  const loginLimiter = createRateLimiter(limits.login);
+  const signupLimiter = createRateLimiter(limits.signup);
+  // Rotation et test des proxys ont besoin de la clé pour déchiffrer les identifiants.
+  attachSecretKey(store, config.secretKey);
   let worker = null;
   let scheduler = null;
 
-  function decryptProxy(userId) {
-    const row = store.getProxySettings(userId);
-    if (!row) return null;
-    const parsed = JSON.parse(decryptSecret(row.secret_box, config.secretKey));
-    return { scheme: row.scheme, host: row.host, port: Number(row.port), ...parsed };
+  /**
+   * Proxy du prochain cycle : rotation dans la liste activée, puis compteurs
+   * mis à jour par le worker selon le résultat.
+   */
+  function pickProxy(userId) {
+    return nextProxy(store, userId);
   }
 
   if (openBrowser && runCycle) {
     scheduler = createScheduler({ store, config, log: (message) => logger.info(message) });
     worker = createWorker({
-      store, config, scheduler, openBrowser, runCycle, decryptProxy, logger,
+      store, config, scheduler, openBrowser, runCycle, decryptProxy: pickProxy, logger,
+      // Résultat d'un cycle imputé au proxy réellement utilisé.
+      onProxyOutcome: (proxyId, userId, outcome) => {
+        if (!proxyId) return;
+        const state = store.getProxyState(userId);
+        store.recordProxyOutcome(proxyId, { ...outcome, disableAfter: state.disableAfter });
+      },
     });
     if (startWorker) worker.start();
   }
@@ -232,35 +264,139 @@ export function createApp({ config, store, logger = console, openBrowser, runCyc
     });
   });
 
-  /* --- proxy --- */
-  route('GET', '/api/proxy', (req, res, user) => {
-    const row = store.getProxySettings(user.id);
+  /* --- proxys (liste illimitée + rotation) --- */
+  route('GET', '/api/proxies', (req, res, user) => {
+    const proxies = store.listProxies(user.id);
+    const state = store.getProxyState(user.id);
     sendJson(res, 200, {
-      configured: Boolean(row),
-      scheme: row?.scheme || null,
-      host: row?.host || null,
-      port: row?.port ? Number(row.port) : null,
-      username: row?.username_masked || null,
-      updatedAt: row?.updated_at || null,
+      proxies,
+      state,
+      totals: {
+        count: proxies.length,
+        enabled: proxies.filter((proxy) => proxy.enabled).length,
+        cycles: proxies.reduce((sum, proxy) => sum + proxy.cycles, 0),
+      },
     });
   });
 
-  route('POST', '/api/proxy', async (req, res, user) => {
+  route('POST', '/api/proxies', async (req, res, user) => {
     const body = await readJsonBody(req);
-    const secret = await validateProxyConfiguration(body);
-    store.saveProxySettings(user.id, {
-      scheme: secret.scheme,
-      host: secret.host,
-      port: secret.port,
-      username_masked: maskValue(secret.username),
-      secret_box: encryptSecret(JSON.stringify({ username: secret.username, password: secret.password }), config.secretKey),
+    const raw = String(body.text || '').trim();
+    if (!raw) throw new HttpError(400, 'Collez au moins une ligne de proxy.');
+    const parsed = parseProxyImport(raw, {
+      defaultUsername: String(body.defaultUsername || ''),
+      defaultPassword: String(body.defaultPassword || ''),
+      defaultScheme: String(body.defaultScheme || 'http'),
     });
-    sendJson(res, 200, { configured: true, message: 'Identifiants chiffrés AES-256-GCM sur le VPS. Ils ne sont jamais renvoyés au navigateur.' });
+    assertProxyLimit(parsed.entries.length);
+    if (!parsed.entries.length) {
+      const detail = parsed.errors.slice(0, 3).map((error) => `ligne ${error.line || '?'} : ${error.message}`).join(' ; ');
+      throw new HttpError(400, detail ? `Aucun proxy valide. ${detail}` : 'Aucun proxy valide dans le texte fourni.');
+    }
+
+    // Déduplication avec la liste existante (même hôte + port + identifiant).
+    const existing = new Set(store.listProxies(user.id).map((proxy) => `${proxy.host}:${proxy.port}:${proxy.username}`));
+    const checked = [];
+    for (const entry of parsed.entries) {
+      const signature = `${entry.host}:${entry.port}:${maskValue(entry.username)}`;
+      if (existing.has(signature)) { parsed.duplicates += 1; continue; }
+      try {
+        const valid = await validateProxyEntry(entry);
+        checked.push(valid);
+        existing.add(signature);
+      } catch (error) {
+        parsed.errors.push({ line: entry.line || 0, message: error.message });
+      }
+    }
+    if (!checked.length) {
+      // Tout était déjà connu : ce n'est pas une erreur, c'est un réimport.
+      if (parsed.duplicates && !parsed.errors.length) {
+        sendJson(res, 200, {
+          added: 0,
+          duplicates: parsed.duplicates,
+          rejected: 0,
+          errors: [],
+          state: store.getProxyState(user.id),
+          message: `Ces ${parsed.duplicates} proxy(s) sont déjà dans la liste, rien à ajouter.`,
+        });
+        return;
+      }
+      const detail = parsed.errors.slice(0, 3).map((error) => `ligne ${error.line || '?'} : ${error.message}`).join(' ; ');
+      throw new HttpError(400, `Aucun proxy n’a pu être ajouté. ${detail || 'Doublons uniquement.'}`);
+    }
+
+    store.insertProxies(user.id, checked.map((entry, index) => proxyRow(
+      entry, config.secretKey, randomUUID(), String(entry.label || `Proxy ${index + 1}`),
+    )));
+    const state = store.getProxyState(user.id);
+    // Le premier import active la rotation : sinon rien ne serait utilisé.
+    if (!state.enabled) store.saveProxyState(user.id, { enabled: true });
+
+    sendJson(res, 201, {
+      added: checked.length,
+      duplicates: parsed.duplicates,
+      rejected: parsed.errors.length,
+      errors: parsed.errors.slice(0, 10),
+      state: store.getProxyState(user.id),
+      message: `${checked.length} proxy(s) ajouté(s)${parsed.duplicates ? `, ${parsed.duplicates} doublon(s) ignoré(s)` : ''}${parsed.errors.length ? `, ${parsed.errors.length} ligne(s) rejetée(s)` : ''}.`,
+    });
   });
 
-  route('DELETE', '/api/proxy', (req, res, user) => {
-    store.deleteProxySettings(user.id);
-    sendJson(res, 200, { configured: false });
+  route('PATCH', '/api/proxies', async (req, res, user) => {
+    const body = await readJsonBody(req);
+    // Réglages de la rotation.
+    if (body.state && typeof body.state === 'object') {
+      const patch = {};
+      if ('enabled' in body.state) patch.enabled = Boolean(body.state.enabled);
+      if ('rotation' in body.state) patch.rotation = body.state.rotation === 'random' ? 'random' : 'order';
+      if ('disableAfter' in body.state) patch.disableAfter = Number(body.state.disableAfter) || 3;
+      sendJson(res, 200, { state: store.saveProxyState(user.id, patch) });
+      return;
+    }
+    const id = String(body.id || '');
+    if (!id) throw new HttpError(400, 'Identifiant de proxy manquant.');
+    if (!store.getProxyRow(user.id, id)) throw new HttpError(404, 'Proxy introuvable.');
+    const patch = {};
+    if ('enabled' in body) patch.enabled = body.enabled ? 1 : 0;
+    if ('label' in body) patch.label = String(body.label || '').slice(0, 80);
+    // Réactiver remet le compteur d'échecs à zéro.
+    if (body.enabled) patch.consecutive_failures = 0;
+    sendJson(res, 200, { proxy: store.updateProxy(user.id, id, patch) });
+  });
+
+  route('DELETE', '/api/proxies', (req, res, user, session, url) => {
+    const id = url.searchParams.get('id') || '';
+    if (id === 'disabled') {
+      const removed = store.deleteDisabledProxies(user.id);
+      sendJson(res, 200, { removed, message: `${removed} proxy(s) désactivé(s) supprimé(s).` });
+      return;
+    }
+    if (!id) throw new HttpError(400, 'Identifiant de proxy manquant.');
+    if (!store.deleteProxy(user.id, id)) throw new HttpError(404, 'Proxy introuvable.');
+    sendJson(res, 200, { ok: true });
+  });
+
+  route('POST', '/api/proxies/test', async (req, res, user) => {
+    const body = await readJsonBody(req);
+    const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+    const targets = ids.length
+      ? ids.map((id) => store.getProxyRow(user.id, id)).filter(Boolean)
+      : store.listProxies(user.id).filter((proxy) => proxy.enabled).map((proxy) => store.getProxyRow(user.id, proxy.id));
+    if (!targets.length) throw new HttpError(400, 'Aucun proxy à tester.');
+    const results = [];
+    for (const row of targets.slice(0, 25)) {
+      const started = Date.now();
+      try {
+        const entry = decryptProxyRow(row, config.secretKey);
+        await probeProxy(entry, config.proxyTestTimeoutMs);
+        store.recordProxyOutcome(row.id, { success: true, disableAfter: 999 });
+        results.push({ id: row.id, host: row.host, port: row.port, ok: true, latencyMs: Date.now() - started });
+      } catch (error) {
+        store.recordProxyOutcome(row.id, { success: false, error: error.message, disableAfter: 999 });
+        results.push({ id: row.id, host: row.host, port: row.port, ok: false, message: String(error.message).slice(0, 160), latencyMs: Date.now() - started });
+      }
+    }
+    sendJson(res, 200, { results, tested: results.length });
   });
 
   /* --- serveur --- */

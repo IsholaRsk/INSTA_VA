@@ -154,6 +154,7 @@
     var settings = options || {};
     var entries = [];
     var errors = [];
+    var duplicates = 0;
     var seen = Object.create(null);
     var lines = String(text == null ? "" : text).split(/\r?\n/);
 
@@ -166,12 +167,16 @@
         return;
       }
       var signature = proxySignature(parsed.value);
-      if (seen[signature]) return;
+      if (seen[signature]) {
+        // Doublon dans le texte collé : ignoré, mais compté pour le compte rendu.
+        duplicates += 1;
+        return;
+      }
       seen[signature] = true;
       entries.push(parsed.value);
     });
 
-    return { entries: entries, errors: errors };
+    return { entries: entries, errors: errors, duplicates: duplicates };
   }
 
   function proxyEndpoint(proxy) {
