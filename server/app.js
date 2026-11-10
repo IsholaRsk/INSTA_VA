@@ -9,6 +9,8 @@ import {
   assertProxyLimit,
   attachSecretKey,
   decryptProxyRow,
+  MAX_PROXY_IMPORT_BYTES,
+  MAX_PROXY_IMPORT_CHARS,
   nextProxy,
   parseProxyImport,
   probeProxy,
@@ -280,9 +282,14 @@ export function createApp({
   });
 
   route('POST', '/api/proxies', async (req, res, user) => {
-    const body = await readJsonBody(req);
+    // Un fichier texte de plusieurs milliers de lignes ne tient pas dans les
+    // 64 Ko par défaut.
+    const body = await readJsonBody(req, MAX_PROXY_IMPORT_BYTES);
     const raw = String(body.text || '').trim();
     if (!raw) throw new HttpError(400, 'Collez au moins une ligne de proxy.');
+    if (raw.length > MAX_PROXY_IMPORT_CHARS) {
+      throw new HttpError(413, `Fichier trop volumineux (${Math.round(raw.length / 1024)} Ko). Limite : ${Math.round(MAX_PROXY_IMPORT_CHARS / 1024)} Ko par import.`);
+    }
     const parsed = parseProxyImport(raw, {
       defaultUsername: String(body.defaultUsername || ''),
       defaultPassword: String(body.defaultPassword || ''),
@@ -296,6 +303,9 @@ export function createApp({
 
     // Déduplication avec la liste existante (même hôte + port + identifiant).
     const existing = new Set(store.listProxies(user.id).map((proxy) => `${proxy.host}:${proxy.port}:${proxy.username}`));
+    // Total de lignes réellement fournies, doublons du fichier compris : c'est
+    // la seule base honnête pour un compte rendu (« 9 rejetées sur 17 » mentait).
+    const totalLines = parsed.entries.length + parsed.errors.length + parsed.duplicates;
     const checked = [];
     for (const entry of parsed.entries) {
       const signature = `${entry.host}:${entry.port}:${maskValue(entry.username)}`;
@@ -338,7 +348,13 @@ export function createApp({
       rejected: parsed.errors.length,
       errors: parsed.errors.slice(0, 10),
       state: store.getProxyState(user.id),
-      message: `${checked.length} proxy(s) ajouté(s)${parsed.duplicates ? `, ${parsed.duplicates} doublon(s) ignoré(s)` : ''}${parsed.errors.length ? `, ${parsed.errors.length} ligne(s) rejetée(s)` : ''}.`,
+      // Le compte rendu doit alerter quand une grande partie du fichier est rejetée :
+      // afficher « 1 ajouté » sans insister ferait croire à un import réussi.
+      message: `${checked.length} proxy(s) ajouté(s)${parsed.duplicates ? `, ${parsed.duplicates} doublon(s) ignoré(s)` : ''}`
+        + (parsed.errors.length
+          ? `. ⚠ ${parsed.errors.length} ligne(s) rejetée(s) sur ${totalLines}.`
+          : '.'),
+      partial: parsed.errors.length > 0,
     });
   });
 
@@ -444,6 +460,14 @@ export function createApp({
       if (res.headersSent) { res.end(); return; }
       const status = statusOf(error);
       if (status >= 500) logger.error('requête échouée', error?.stack || error);
+      // Corps interrompu (413) : le client est encore en train d'envoyer. Sans
+      // fermeture explicite, il n'atteint jamais la réponse et reste bloqué.
+      if (status === 413) {
+        res.setHeader('Connection', 'close');
+        sendJson(res, status, { error: error?.message || 'Erreur interne.', code: error?.code || 'error' });
+        req.destroy();
+        return;
+      }
       sendJson(res, status, { error: error?.message || 'Erreur interne.', code: error?.code || 'error' });
     } finally {
       if (config.logLevel === 'debug') {

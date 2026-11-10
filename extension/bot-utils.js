@@ -173,6 +173,9 @@
         return;
       }
       seen[signature] = true;
+      // Numéro de ligne conservé : indispensable pour corriger un import de
+      // plusieurs milliers de lignes (sinon l'erreur est anonyme).
+      parsed.value.line = index + 1;
       entries.push(parsed.value);
     });
 

@@ -351,7 +351,12 @@ Beaucoup de sites à clics sont derrière Cloudflare. Un navigateur automatisé 
 
 ### Importer ta liste de proxys
 
-Dans l'application, section **Proxys et rotation**, colle la liste entière dans la zone de texte — une ligne par proxy, sans limite de nombre. Formats acceptés :
+Dans l'application, section **Proxys et rotation**, deux façons d'importer :
+
+- **depuis un fichier** — clique sur **Choisir un fichier** ou glisse ton `.txt` directement dans la zone pointillée. L'export Webshare ou ProxyScrape s'importe tel quel ; le fichier peut faire jusqu'à 2 Mo (soit plusieurs milliers de proxys) et être encodé en UTF-8 ou UTF-16, avec des fins de ligne Windows. Le contenu remplit la zone de texte : tu peux le relire avant de valider, puis **Importer la liste**. Rien n'est envoyé tant que tu n'as pas cliqué.
+- **en collant le texte** — une ligne par proxy, sans limite de nombre.
+
+Formats acceptés :
 
 ```
 proxy1.webshare.io:8080:identifiant:motdepasse
@@ -360,7 +365,7 @@ socks5://identifiant:motdepasse@proxy3.webshare.io:1080
 proxy4.webshare.io:8080          (identifiant et mot de passe communs, renseignés dessous)
 ```
 
-L'import affiche le compte rendu : ajoutés, doublons ignorés (un proxy déjà présent n'est jamais ajouté deux fois), lignes rejetées avec leur numéro. Le premier import **active la rotation** automatiquement. Les lignes vides et les commentaires `#` sont ignorés.
+L'import affiche le compte rendu : ajoutés, doublons ignorés (un proxy déjà présent n'est jamais ajouté deux fois), et **les numéros de ligne des rejets** — `ligne 11`, `ligne 43` — pour retrouver directement la faute dans ton fichier. Un import partiel est signalé en rouge, jamais maquillé en réussite. Le premier import **active la rotation** automatiquement. Les lignes vides et les commentaires `#` sont ignorés.
 
 Ensuite :
 

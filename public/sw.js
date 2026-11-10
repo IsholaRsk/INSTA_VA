@@ -1,4 +1,7 @@
-const CACHE_NAME = 'instava-bot-v2';
+// À incrémenter à chaque changement d'interface : sinon le téléphone garde
+// l'ancienne version en cache et n'affiche jamais les nouveautés.
+const CACHE_NAME = 'instava-bot-v3';
+const CACHE_PREFIX = 'instava-';
 const SHELL = [
   '/',
   '/index.html',
@@ -23,7 +26,8 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     const names = await caches.keys();
-    await Promise.all(names.filter((name) => name.startsWith('instava-mobile-') && name !== CACHE_NAME).map((name) => caches.delete(name)));
+    // Tous les caches de l'application, y compris ceux des anciennes versions.
+    await Promise.all(names.filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME).map((name) => caches.delete(name)));
     await self.clients.claim();
   })());
 });
@@ -48,9 +52,9 @@ self.addEventListener('fetch', (event) => {
     })());
     return;
   }
+  // Réseau d'abord : une mise à jour du serveur est visible immédiatement.
+  // Le cache ne sert que hors ligne.
   event.respondWith((async () => {
-    const cached = await caches.match(request);
-    if (cached) return cached;
     try {
       const response = await fetch(request);
       if (response.ok && url.pathname.startsWith('/')) {
@@ -59,7 +63,8 @@ self.addEventListener('fetch', (event) => {
       }
       return response;
     } catch {
-      return Response.error();
+      const cached = await caches.match(request);
+      return cached || Response.error();
     }
   })());
 });
