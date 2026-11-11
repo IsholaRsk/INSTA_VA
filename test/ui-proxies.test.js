@@ -6,7 +6,7 @@ import { JSDOM } from 'jsdom';
 // Les scripts type="module" ne s'exécutent pas sous jsdom : on vérifie le câblage statique
 // (identifiants présents, aucune référence à l'ancienne API mono-proxy, appels cohérents).
 test('interface : la section proxys expose l’import en masse et la rotation', async () => {
-  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('../public/legacy.html', import.meta.url), 'utf8');
   const dom = new JSDOM(html);
   const { document } = dom.window;
 
@@ -44,7 +44,7 @@ test('proxys : les erreurs réseau sont traduites, jamais renvoyées en anglais'
 });
 
 test('import fichier : le sélecteur, le glisser-déposer et la remise à zéro sont câblés', async () => {
-  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('../public/legacy.html', import.meta.url), 'utf8');
   const { document } = new JSDOM(html).window;
   for (const id of ['proxy-file', 'proxy-file-button', 'proxy-file-clear', 'proxy-file-name', 'proxy-drop']) {
     assert.ok(document.getElementById(id), `#${id} doit exister`);
@@ -77,7 +77,7 @@ test('import fichier : un fichier UTF-16 avec BOM et CRLF est décodé sans cara
 
   const { JSDOM } = await import('jsdom');
   const { readFile } = await import('node:fs/promises');
-  const dom = new JSDOM(await readFile(new URL('../public/index.html', import.meta.url), 'utf8'), { url: 'http://127.0.0.1/' });
+  const dom = new JSDOM(await readFile(new URL('../public/legacy.html', import.meta.url), 'utf8'), { url: 'http://127.0.0.1/' });
   const previous = { window: globalThis.window, document: globalThis.document, TL: globalThis.TextDecoder };
   globalThis.window = dom.window;
   globalThis.document = dom.window.document;
@@ -108,7 +108,7 @@ test('import fichier : un fichier UTF-16 avec BOM et CRLF est décodé sans cara
 test('activité : l’IP de sortie est visible dans l’application, pas seulement dans les logs', async () => {
   const { readFile } = await import('node:fs/promises');
   const { JSDOM } = await import('jsdom');
-  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('../public/legacy.html', import.meta.url), 'utf8');
   const dom = new JSDOM(html, { url: 'http://127.0.0.1/' });
   const previous = { window: globalThis.window, document: globalThis.document };
   globalThis.window = dom.window;
@@ -150,7 +150,7 @@ test('activité : l’IP de sortie est visible dans l’application, pas seuleme
 test('test des proxys : la nature de l’IP de sortie est affichée, datacenter signalé', async () => {
   const { readFile } = await import('node:fs/promises');
   const { JSDOM } = await import('jsdom');
-  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('../public/legacy.html', import.meta.url), 'utf8');
   const dom = new JSDOM(html, { url: 'http://127.0.0.1/' });
   const previous = { window: globalThis.window, document: globalThis.document };
   globalThis.window = dom.window;
@@ -192,7 +192,7 @@ test('test des proxys : la nature de l’IP de sortie est affichée, datacenter 
 test('diagnostic : le panneau affiche les cinq contrôles et l’état réel', async () => {
   const { readFile } = await import('node:fs/promises');
   const { JSDOM } = await import('jsdom');
-  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('../public/legacy.html', import.meta.url), 'utf8');
   const dom = new JSDOM(html, { url: 'http://127.0.0.1/' });
   const previous = { window: globalThis.window, document: globalThis.document };
   globalThis.window = dom.window;
@@ -238,7 +238,7 @@ test('diagnostic : le panneau affiche les cinq contrôles et l’état réel', a
 test('thème : le panneau d’état du bot reflète le moteur sans jargon', async () => {
   const { readFile } = await import('node:fs/promises');
   const { JSDOM } = await import('jsdom');
-  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('../public/legacy.html', import.meta.url), 'utf8');
   const dom = new JSDOM(html, { url: 'http://127.0.0.1/' });
   const previous = { window: globalThis.window, document: globalThis.document };
   globalThis.window = dom.window;

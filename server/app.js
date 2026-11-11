@@ -271,6 +271,8 @@ export function createApp({
       target_id: target.id,
       pseudo: target.pseudo,
       today: store.clicksOnDay(user.id, target.id, today),
+      // Cumul par cible : affiché à côté du jour dans la nouvelle interface.
+      clicksTotal: store.clicksTotalForTarget(user.id, target.id),
       history: store.dailyClicksByTarget(user.id, target.id, 14),
     }));
     sendJson(res, 200, {
@@ -278,6 +280,8 @@ export function createApp({
       visits,
       today,
       todayTotal: store.dailyClicksForUser(user.id, today),
+      // Total cumulé : c'est la base du solde affiché dans la carte.
+      clicksTotal: store.clicksTotal(user.id),
       clicksByTarget: perTarget,
       stats: store.stats(user.id),
     });

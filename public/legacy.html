@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#080a12">
+  <meta name="description" content="Interface mobile InstaVA pour gérer des cycles URL vers lien.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="InstaVA">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="/icon.svg">
+  <link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png">
+  <link rel="stylesheet" href="/styles.css">
+  <!-- Ancien tableau de bord, conservé à /legacy.html -->
+  <title>InstaVA — mobile</title>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="InstaVA accueil">
+        <img src="/icon.svg" width="42" height="42" alt="">
+        <span><strong>InstaVA</strong><small>mobile runner</small></span>
+      </a>
+      <div class="top-actions">
+        <span id="connection-state" class="connection-state"><i></i> hors ligne</span>
+        <button id="logout-button" class="button button-quiet hidden" type="button">Déconnexion</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="auth-panel" class="auth-layout">
+        <div class="intro-card">
+          <p class="eyebrow">PWA · iPhone · Android</p>
+          <h1>Votre bot,<br><span>dans votre poche.</span></h1>
+          <p class="intro-copy">Votre bot tourne sur votre VPS, jour et nuit. Depuis votre téléphone, vous lancez les cibles et suivez chaque clic : le navigateur distant ouvre l’URL, attend la stabilisation, puis clique le lien ou le bouton correspondant au libellé.</p>
+          <div class="install-note">
+            <span class="install-symbol">＋</span>
+            <div><strong>Ajoutez l’app à l’écran d’accueil</strong><p>iPhone : Partager → Sur l’écran d’accueil. Android : menu du navigateur → Installer l’application.</p></div>
+          </div>
+        </div>
+        <div class="card auth-card">
+          <div class="auth-tabs" role="tablist" aria-label="Authentification">
+            <button class="auth-tab active" type="button" data-auth-mode="login" role="tab" aria-selected="true">Connexion</button>
+            <button class="auth-tab" type="button" data-auth-mode="signup" role="tab" aria-selected="false">Créer un compte</button>
+          </div>
+          <form id="auth-form" class="stack-form">
+            <label for="auth-email">E-mail</label>
+            <input id="auth-email" type="email" autocomplete="email" inputmode="email" required maxlength="254" placeholder="vous@exemple.com">
+            <label for="auth-password">Mot de passe</label>
+            <input id="auth-password" type="password" autocomplete="current-password" required minlength="8" maxlength="128" placeholder="8 caractères minimum">
+            <div class="field hidden" id="signup-code-field">
+              <label for="signup-code">Code d’invitation</label>
+              <input id="signup-code" type="text" maxlength="128" autocomplete="off" placeholder="Fourni par le propriétaire du VPS">
+            </div>
+            <button id="auth-submit" class="button button-primary full-width" type="submit">Se connecter</button>
+          </form>
+          <p id="auth-message" class="form-message" aria-live="polite"></p>
+          <p class="fine-print">Tout reste sur votre VPS : comptes, cibles et historique dans une base SQLite, identifiants Webshare chiffrés AES-256-GCM. Aucun service cloud externe.</p>
+        </div>
+      </section>
+
+      <section id="workspace" class="hidden">
+        <div class="welcome-row">
+          <div><p class="eyebrow">Espace de travail</p><h1>Bonjour <span id="user-email"></span></h1></div>
+          <button id="install-button" class="button button-secondary hidden" type="button">Installer l’app</button>
+        </div>
+        <div id="notice" class="notice hidden" role="status"></div>
+
+        <section class="card section-card" aria-labelledby="target-form-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Configuration</p><h2 id="target-form-title">Nouvelle cible</h2></div>
+            <span class="step-pill">01</span>
+          </div>
+          <form id="target-form" class="target-form">
+            <div class="form-grid">
+              <div class="field full-field">
+                <label for="target-pseudo">Pseudo ou nom court</label>
+                <input id="target-pseudo" type="text" maxlength="60" required placeholder="Ex. Boutique A">
+              </div>
+              <div class="field full-field">
+                <label for="target-url">URL à ouvrir</label>
+                <input id="target-url" type="text" inputmode="url" maxlength="2048" autocomplete="url" required placeholder="https://exemple.com/page">
+              </div>
+              <div class="field full-field">
+                <label for="target-label">Libellé exact du lien ou du bouton <span class="optional">(facultatif)</span></label>
+                <input id="target-label" type="text" maxlength="100" placeholder="Vide = cliquer l’élément principal">
+                <p class="field-help">Renseigné, le bot clique le lien <em>ou</em> le bouton dont le texte correspond exactement; sans aucun clic si le libellé est absent ou ambigu. Vide, il clique l’élément cliquable principal. Aucun mot de passe ni code n’est saisi.</p>
+              </div>
+              <div class="field">
+                <label for="target-mode">Mode</label>
+                <select id="target-mode">
+                  <option value="interval">Intervalle — réparti sur des jours</option>
+                  <option value="goal">Objectif — série continue</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="target-count">Nombre visé</label>
+                <input id="target-count" type="number" min="1" step="1" value="300" inputmode="numeric" required>
+              </div>
+              <div class="field" id="duration-field">
+                <label for="target-duration">Durée (jours)</label>
+                <input id="target-duration" type="number" min="1" max="365" step="1" value="7" inputmode="numeric" required>
+              </div>
+              <p id="plan-preview" class="field-help full-field">Le bot fait au moins 100 clics par jour : un total trop faible est relevé automatiquement.</p>
+            </div>
+            <div class="form-actions">
+              <button id="save-target" class="button button-primary" type="submit">Enregistrer la cible</button>
+              <button id="cancel-edit" class="button button-quiet hidden" type="button">Annuler la modification</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="card section-card" aria-labelledby="targets-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Vos réglages</p><h2 id="targets-title">Cibles enregistrées</h2></div>
+            <label class="select-all"><input id="select-all" type="checkbox"><span>Tout sélectionner</span></label>
+          </div>
+          <div id="target-list" class="target-list"><div class="empty-state">Chargement des cibles…</div></div>
+          <div class="run-panel">
+            <div class="run-options">
+              <label class="check-row"><input id="confirm-clicks" type="checkbox" checked><span><strong>Confirmer les clics</strong><small>Chaque visite attend votre approbation avant de cliquer.</small></span></label>
+              <button id="start-run" class="button button-primary" type="button" disabled>Lancer les cibles sélectionnées</button>
+            </div>
+            <p class="field-help">Premier cycle environ une minute après le lancement. En mode intervalle : au moins 100 clics par jour sur la durée choisie, 288 clics par jour au maximum par cible (5 minutes d’écart), les clics manqués sont rattrapés le lendemain. En mode objectif : la série s’enchaîne sans durée.</p>
+          </div>
+        </section>
+
+        <section class="card section-card proxy-card" aria-labelledby="proxy-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Réseau</p><h2 id="proxy-title">Proxys et rotation</h2></div>
+            <span id="proxy-badge" class="status-badge status-neutral">Aucun proxy</span>
+          </div>
+          <p class="proxy-copy">Collez votre liste de proxys (Webshare ou autre), une ligne par proxy : <code>hôte:port:identifiant:motdepasse</code>. Chaque cycle prend le proxy suivant de la liste, donc vos visites ne sortent jamais deux fois de suite par la même adresse IP. Les identifiants sont chiffrés (AES-256-GCM) sur le VPS et ne sont jamais renvoyés au navigateur. Attention : un proxy datacenter a souvent la même mauvaise réputation que l’IP du VPS face à Cloudflare — seul un proxy résidentel change réellement la donne.</p>
+
+          <form id="proxy-form" class="form-grid">
+            <div class="field full-field">
+              <label for="proxy-text">Liste des proxys</label>
+              <textarea id="proxy-text" rows="6" spellcheck="false" maxlength="500000" placeholder="proxy1.webshare.io:8080:identifiant:motdepasse&#10;proxy2.webshare.io:8080:identifiant:motdepasse&#10;...&#10;&#10;Formats acceptés : hôte:port:identifiant:motdepasse · identifiant:motdepasse@hôte:port · socks5://identifiant:motdepasse@hôte:port · hôte:port"></textarea>
+            </div>
+            <div class="field full-field">
+              <div id="proxy-drop" class="proxy-drop">
+                <input id="proxy-file" type="file" accept=".txt,.csv,.list,.proxies,text/plain" class="visually-hidden">
+                <p class="proxy-drop-title">Ou dépose ton fichier <code>.txt</code> ici</p>
+                <p class="proxy-drop-help">Une ligne par proxy. Le contenu remplit la zone ci-dessus : rien n’est envoyé avant que tu cliques sur <strong>Importer la liste</strong>. Formats d’export Webshare et ProxyScrape acceptés tels quels.</p>
+                <div class="proxy-drop-actions">
+                  <button id="proxy-file-button" class="button button-quiet" type="button">Choisir un fichier</button>
+                  <button id="proxy-file-clear" class="button button-quiet hidden" type="button">Retirer le fichier</button>
+                </div>
+                <p id="proxy-file-name" class="proxy-drop-file hidden" aria-live="polite"></p>
+              </div>
+            </div>
+            <div class="field">
+              <label for="proxy-scheme">Type par défaut</label>
+              <select id="proxy-scheme"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select>
+            </div>
+            <div class="field">
+              <label for="proxy-username">Identifiant par défaut (si absent)</label>
+              <input id="proxy-username" type="text" maxlength="512" autocomplete="off" placeholder="facultatif">
+            </div>
+            <div class="field">
+              <label for="proxy-password">Mot de passe par défaut (si absent)</label>
+              <input id="proxy-password" type="password" maxlength="512" autocomplete="new-password" placeholder="facultatif">
+            </div>
+            <div class="field">
+              <label for="proxy-rotation">Rotation</label>
+              <select id="proxy-rotation"><option value="order">Dans l’ordre de la liste</option><option value="random">Au hasard à chaque cycle</option></select>
+            </div>
+            <div class="form-actions full-field">
+              <button id="save-proxy" class="button button-secondary" type="submit">Importer la liste</button>
+              <button id="test-proxies" class="button button-quiet" type="button">Tester les proxys actifs</button>
+              <button id="remove-proxy" class="button button-quiet hidden" type="button">Supprimer les proxys désactivés</button>
+              <button id="clear-proxies" class="button button-quiet hidden" type="button">Vider la liste</button>
+            </div>
+          </form>
+          <p id="proxy-message" class="form-message" aria-live="polite"></p>
+
+          <div class="proxy-toolbar">
+            <span id="proxy-summary" class="field-help">Aucun proxy importé.</span>
+            <label class="check-row proxy-switch"><input id="proxy-enabled" type="checkbox"><span><strong>Utiliser la rotation</strong><small>Décochez pour sortir par l’IP du VPS.</small></span></label>
+          </div>
+          <div id="proxy-list" class="proxy-list"><div class="empty-state">Aucun proxy importé.</div></div>
+        </section>
+
+        <section class="card section-card" aria-labelledby="diagnostic-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Contrôles du site</p><h2 id="diagnostic-title">Sur quoi je suis jugé</h2></div>
+            <span id="diagnostic-badge" class="status-badge status-neutral">—</span>
+          </div>
+          <p class="proxy-copy">Le site vérifie dans cet ordre : l’IP et son réseau, la réputation de cette IP, l’empreinte TLS, les en-têtes, puis les cookies et le comportement. Le premier contrôle qui échoue suffit à te refuser. Voici l’état réel de ton installation sur les points que le bot maîtrise.</p>
+          <div id="diagnostic-list" class="diagnostic-list"><div class="empty-state">Diagnostic non chargé.</div></div>
+          <div class="form-actions">
+            <button id="clear-sessions" class="button button-quiet" type="button">Effacer les sessions conservées</button>
+          </div>
+          <p id="diagnostic-message" class="form-message" aria-live="polite"></p>
+        </section>
+
+        <section class="card section-card" aria-labelledby="journal-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Journal quotidien</p><h2 id="journal-title">Clics du jour</h2></div>
+            <span id="today-total" class="status-badge status-neutral">0 clic</span>
+          </div>
+          <div id="journal-list" class="journal-list"><div class="empty-state">Aucun clic enregistré aujourd’hui.</div></div>
+          <p class="field-help">Chaque clic réussi est compté par cible et par jour (fuseau du serveur). C’est ce journal qui garantit le minimum de 100 clics par jour et le rattrapage des journées manquées.</p>
+        </section>
+
+        <section class="card section-card" aria-labelledby="activity-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Suivi</p><h2 id="activity-title">Activité récente</h2></div>
+            <button id="refresh-activity" class="button button-quiet button-small" type="button">Actualiser</button>
+          </div>
+          <div id="bot-status" class="bot-status" aria-live="polite">
+            <span class="bot-pulse" aria-hidden="true"></span>
+            <span id="bot-status-text">Vérification de l’état du bot…</span>
+          </div>
+          <div id="run-list" class="run-list"></div>
+          <div id="activity-list" class="activity-list"><div class="empty-state">Aucun cycle lancé.</div></div>
+          <p class="field-help cloud-note">Les cycles planifiés s’exécutent sur votre VPS même lorsque l’app ou le téléphone est fermé. Cette page se rafraîchit toutes les 15 secondes.</p>
+        </section>
+      </section>
+    </main>
+    <footer><span>InstaVA · bot sur VPS</span><span>Au moins 100 clics par jour · 288 maximum</span></footer>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
