@@ -496,9 +496,7 @@ function renderProxyList() {
   proxyListNode.replaceChildren();
   const enabledCount = savedProxies.filter((proxy) => proxy.enabled).length;
   emptyProxiesNode.hidden = savedProxies.length > 0;
-  proxySummaryNode.textContent = savedProxies.length
-    ? `${enabledCount}/${savedProxies.length} actif(s) · ${proxySettings.mode === "random" ? "au hasard" : "dans l’ordre"}`
-    : "Aucun proxy";
+  proxySummaryNode.textContent = proxySummaryText();
 
   for (const proxy of savedProxies) {
     const item = document.createElement("article");
@@ -548,9 +546,13 @@ function renderProxyList() {
       : proxy.lastTestError
         ? `Dernier test échoué : ${proxy.lastTestError}`
         : "Jamais testé";
+    const kind = proxy.ipKind
+      ? InstaVAUtils.describeIpKind({ kind: proxy.ipKind, org: proxy.ipOrg, asn: proxy.ipAsn })
+      : "Nature d’IP inconnue — lancez « Tester »";
     const identity = proxy.name ? `${endpoint} · ${maskUsername(proxy.username)}` : maskUsername(proxy.username);
     meta.textContent = [
       proxy.name ? endpoint : identity,
+      kind,
       usage,
       test,
       proxy.disabledReason || (proxy.lastError ? `Dernière erreur : ${proxy.lastError}` : ""),
@@ -571,9 +573,16 @@ function renderProxyList() {
     proxyListNode.append(item);
   }
 
-  proxySummaryNode.textContent = savedProxies.length
-    ? `${savedProxies.filter((proxy) => proxy.enabled).length}/${savedProxies.length} actif(s) · ${proxySettings.mode === "random" ? "au hasard" : "dans l’ordre"}`
-    : "Aucun proxy";
+  proxySummaryNode.textContent = proxySummaryText();
+}
+
+/** Récapitulatif : combien sont actifs et combien sont résidentiels. */
+function proxySummaryText() {
+  if (!savedProxies.length) return "Aucun proxy";
+  const enabledCount = savedProxies.filter((proxy) => proxy.enabled).length;
+  const residential = savedProxies.filter((proxy) => proxy.enabled && proxy.ipKind === "residential").length;
+  const order = proxySettings.mode === "random" ? "au hasard" : "dans l’ordre";
+  return `${enabledCount}/${savedProxies.length} actif(s) · ${residential} résidentiel(s) · ${order}`;
 }
 
 function proxyActionButton(label, handler, disabled = false) {
@@ -804,6 +813,15 @@ async function testProxy(id) {
     } catch { /* réponse texte simple */ }
     if (!address) throw new Error("Aucune adresse IP renvoyée.");
     result.ip = address.slice(0, 80);
+    // Nature de l'adresse : c'est le premier critère que regarde un site
+    // protégé, avant même l'empreinte du navigateur.
+    try {
+      const asnInfo = await lookupIpAsn(result.ip);
+      result.ipKind = asnInfo.kind;
+      result.ipOrg = asnInfo.org || "";
+      result.ipProvider = asnInfo.provider || "";
+      result.ipAsn = asnInfo.asn || null;
+    } catch { /* annuaire injoignable : la nature reste inconnue, le test reste valide */ }
   } catch (error) {
     result.error = String(error.message || "Test impossible.").slice(0, 200);
   } finally {
@@ -825,6 +843,10 @@ async function testProxy(id) {
       lastTestAt: new Date().toISOString(),
       lastTestIp: result.ip,
       lastTestError: result.error,
+      ipKind: result.ipKind || item.ipKind || "",
+      ipOrg: result.ipOrg || item.ipOrg || "",
+      ipAsn: result.ipAsn || item.ipAsn || null,
+      ipCheckedAt: result.ipKind ? new Date().toISOString() : (item.ipCheckedAt || ""),
       enabled: result.ip ? true : item.enabled,
       disabledReason: result.ip ? "" : item.disabledReason,
     }
@@ -833,12 +855,55 @@ async function testProxy(id) {
   savedProxies = nextProxies;
   renderProxyList();
   if (result.ip) {
-    setStatus(`Proxy ${proxyLabel(proxy)} fonctionnel · IP de sortie ${result.ip}.`);
-    addLog(`${proxyLabel(proxy)} · test réussi`, `IP de sortie observée : ${result.ip}`);
+    const kindLabel = result.ipKind ? InstaVAUtils.describeIpKind({ kind: result.ipKind, org: result.ipOrg, asn: result.ipAsn, provider: result.ipProvider }) : "nature d’IP non identifiée";
+    setStatus(`Proxy ${proxyLabel(proxy)} fonctionnel · IP de sortie ${result.ip} · ${kindLabel}.`);
+    const warning = result.ipKind === "datacenter"
+      ? "\nUn hébergeur est mal noté par les sites protégés : attendez-vous à des vérifications plus fréquentes qu’avec un résidentiel."
+      : "";
+    addLog(`${proxyLabel(proxy)} · test réussi`, `IP de sortie observée : ${result.ip}\n${kindLabel}${warning}`, result.ipKind === "datacenter");
   } else {
     setStatus(`Proxy ${proxyLabel(proxy)} en échec : ${result.error}`);
     addLog(`${proxyLabel(proxy)} · test échoué`, result.error, true);
   }
+}
+
+/**
+ * Interroge un annuaire d'ASN avec repli (ipinfo puis ipwho, tous deux sans
+ * clé). Renvoie toujours un objet : nature « inconnue » si personne ne répond,
+ * pour ne jamais bloquer un test de proxy sur un service tiers.
+ */
+async function lookupIpAsn(ip) {
+  const address = String(ip || "").trim();
+  if (!address) return InstaVAUtils.classifyIp({});
+  const services = [
+    {
+      url: `https://ipinfo.io/${encodeURIComponent(address)}/json`,
+      read: (data) => {
+        const org = String(data?.org || "");
+        const match = /^AS(\d+)\s+(.*)$/i.exec(org.trim());
+        if (match) return { asn: Number(match[1]), org: match[2] };
+        return org ? { asn: null, org } : null;
+      },
+    },
+    {
+      url: `https://ipwho.is/${encodeURIComponent(address)}`,
+      read: (data) => {
+        if (!data || data.success === false) return null;
+        const asn = Number(data?.connection?.asn);
+        const org = String(data?.connection?.org || data?.connection?.isp || "").trim();
+        return (Number.isFinite(asn) && asn > 0) || org ? { asn: Number.isFinite(asn) && asn > 0 ? asn : null, org } : null;
+      },
+    },
+  ];
+  for (const service of services) {
+    try {
+      const response = await fetch(service.url, { cache: "no-store", signal: AbortSignal.timeout(4000) });
+      if (!response.ok) continue;
+      const parsed = service.read(await response.json());
+      if (parsed) return InstaVAUtils.classifyIp(parsed);
+    } catch { /* service suivant */ }
+  }
+  return InstaVAUtils.classifyIp({});
 }
 
 function readInteger(raw, minimum, maximum, label) {
@@ -1019,6 +1084,7 @@ async function startRun() {
   ocrTextNode.textContent = "L’OCR local vérifiera le lien à cliquer pendant chaque cycle.";
 
   let totalFailures = 0;
+  let totalBlocked = 0;
   let completedRuns = 0;
   let totalRuns = 0;
   const dailyJournal = await loadDailyJournal();
@@ -1130,6 +1196,7 @@ async function startRun() {
         };
         addLog(`${plan.target.pseudo} · exécution en erreur`, error.message, true);
       }
+      if (outcome.status === "blocked" || outcome.status === "challenged") totalBlocked += 1;
       if (proxy) await recordProxyOutcome(proxy, outcome, proxyPool);
       if (stopRequested) break;
       if (!plan.batch) {
@@ -1146,9 +1213,12 @@ async function startRun() {
       completedRuns += 1;
     }
 
-    if (stopRequested) setStatus(`Traitement arrêté après ${completedRuns}/${totalRuns} exécution(s).`);
-    else if (totalFailures) setStatus(`Terminé avec ${totalFailures} erreur(s) sur ${completedRuns} exécution(s).`);
-    else setStatus(`Terminé : ${completedRuns} exécution(s) sur ${selectedTargets.length} cible(s).`);
+    const blockedNote = totalBlocked
+      ? ` · ${totalBlocked} page(s) bloquée(s) ou vérifiée(s) (le proxy n’est pas tenu pour responsable)`
+      : "";
+    if (stopRequested) setStatus(`Traitement arrêté après ${completedRuns}/${totalRuns} exécution(s)${blockedNote}.`);
+    else if (totalFailures) setStatus(`Terminé avec ${totalFailures} erreur(s) sur ${completedRuns} exécution(s)${blockedNote}.`);
+    else setStatus(`Terminé : ${completedRuns} exécution(s) sur ${selectedTargets.length} cible(s)${blockedNote}.`);
   } catch (error) {
     if (stopRequested) setStatus(`Traitement arrêté après ${completedRuns}/${totalRuns} exécution(s).`);
     else {
@@ -1478,6 +1548,23 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
     const redirectText = redirectCount ? `${redirectCount} redirection(s)` : "aucune redirection détectée";
     addLog(`${target.pseudo} · arrivée sur l’URL`, `${url}\n→ ${finalTab.url || url}\n${redirectText}${finalTab.title ? ` · ${finalTab.title}` : ""}`);
 
+    // Page de blocage ou vérification anti-bot : l'onglet est fermé tout de
+    // suite et le cycle est marqué « bloqué ». Un 1020 ne dit rien de la
+    // qualité du proxy et ne doit jamais le faire désactiver.
+    const gate = await readPageGate(tab.id);
+    if (gate) {
+      const isHardBlock = gate.kind === "blocked";
+      addLog(
+        `${target.pseudo} · ${isHardBlock ? "blocage du site (1020)" : "vérification anti-bot"}`,
+        isHardBlock
+          ? `Le site refuse purement cette connexion (${gate.reason}). Ce n’est pas une vérification en cours : rien ne se débloquera en attendant. `
+            + "La fenêtre est fermée et la série continue. Un proxy résidentiel est la seule marge de manœuvre."
+          : `Page de vérification affichée (${gate.reason}). La fenêtre est fermée et la série continue.`,
+        true,
+      );
+      return { status: isHardBlock ? "blocked" : "challenged", gate, proxyActive };
+    }
+
     const label = target.linkLabel;
     const activePageTabId = tab.id;
     setStatus(`${target.pseudo} · vérification du lien exact…`);
@@ -1518,7 +1605,8 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
       match = primary.picked;
       addLog(
         `${target.pseudo} · cible choisie automatiquement`,
-        `${primary.links.length} élément(s) cliquable(s) → ${primary.picked.reason} : ${primary.picked.text ? `« ${primary.picked.text} »` : "sans texte"}${primary.picked.href ? `\n→ ${primary.picked.href}` : ""}`,
+        `${primary.links.length} élément(s) cliquable(s) → ${primary.picked.reason} : ${primary.picked.text ? `« ${primary.picked.text} »` : "sans texte"}${primary.picked.href ? `\n→ ${primary.picked.href}` : ""}`
+        + (primary.picked.bioLink ? "\nLien en bio reconnu : il passe devant les boutons d’action du profil." : ""),
       );
     }
     const ocrPhrase = findOcrPhrase(ocrResult.words, label);
@@ -1562,6 +1650,19 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
     } else {
       await waitForStableUrl(activePageTabId);
       finalTab = await chromeCall(chrome.tabs.get, activePageTabId);
+    }
+    // Lien en bio Instagram : Instagram redirige vers l.instagram.com/?u=… au
+    // lieu de la destination. Sans ce décodage, la bio n'est jamais visitée.
+    const unwrapped = InstaVAUtils.unwrapRedirectUrl(finalTab.url || "");
+    if (unwrapped && unwrapped !== finalTab.url && /^https?:/i.test(unwrapped)) {
+      addLog(`${target.pseudo} · lien en bio décodé`, `Le redirecteur masquait la destination : ${unwrapped}`);
+      try {
+        await chromeCall(chrome.tabs.update, (openedTab || tab).id, { url: unwrapped });
+        finalTab = await waitForStableUrl((openedTab || tab).id, false);
+        currentUrlNode.textContent = finalTab.url || unwrapped;
+      } catch (error) {
+        addLog(`${target.pseudo} · destination inaccessible`, error.message, true);
+      }
     }
     currentUrlNode.textContent = finalTab.url || "";
     const redirectsAfterClick = redirectCount - redirectsBeforeClick;
@@ -1699,6 +1800,28 @@ function waitForOpenedTab(openerTabId, onOpened, timeoutMs = 900) {
   });
 }
 
+/**
+ * Lit le titre et un extrait du document pour reconnaître une page de blocage
+ * (1020) ou de vérification. Ne lève jamais : une page illisible n'est pas un
+ * blocage.
+ */
+async function readPageGate(tabId) {
+  try {
+    const result = await sendCDP(tabId, "Runtime.evaluate", {
+      expression: `(() => ({
+        title: document.title || "",
+        html: document.documentElement ? document.documentElement.outerHTML.slice(0, 20000) : "",
+      }))()`,
+      returnByValue: true,
+    });
+    const snapshot = result.result?.value;
+    if (!snapshot) return null;
+    return InstaVAUtils.detectPageGate(snapshot);
+  } catch {
+    return null;
+  }
+}
+
 /** Sélecteur commun : liens + boutons/boutons-liens réellement cliquables. */
 const CLICKABLE_SELECTOR = 'a[href], [role="link"], button, input[type="button"], input[type="submit"], [role="button"], summary';
 
@@ -1744,6 +1867,11 @@ function clickableHelpersSource() {
         text: labelOf(element).slice(0, 160),
         type: kindOf(element),
         area: (right - left) * (bottom - top),
+        tagName: element.tagName,
+        hasClickHandler: typeof element.onclick === "function" ||
+          element.hasAttribute("onclick") || element.getAttribute("tabindex") !== null,
+        isControl: element.tagName === "BUTTON" || element.getAttribute("role") === "button" ||
+          (element.tagName === "INPUT" && /^(button|submit)$/i.test(element.type)),
       };
     };`;
 }
@@ -1797,9 +1925,27 @@ async function findPrimaryLink(tabId) {
       const inNavigation = Boolean(element.closest(NAV));
       const isControl = element.tagName === 'BUTTON' || element.getAttribute('role') === 'button' ||
         (element.tagName === 'INPUT' && /^(button|submit)$/i.test(element.type));
-      const score = description.area + description.text.length * 60 +
-        (inNavigation ? 0 : 4000) + (isControl ? 1200 : 0);
-      visible.push({ ...description, inNavigation, isControl, score });
+      // Le classement est délégué à bot-utils : la surface et la longueur du
+      // texte ne décident plus à la place du sens (lien de bio prioritaire,
+      // boutons d'action rétrogradés).
+      const ranking = InstaVAUtils.scoreClickable({
+        text: description.text,
+        href: description.href,
+        area: description.area,
+        kind: description.type,
+        inNavigation,
+        isControl,
+        tagName: description.tagName,
+        hasClickHandler: description.hasClickHandler,
+      });
+      visible.push({
+        ...description,
+        inNavigation,
+        isControl,
+        score: ranking.score,
+        bioLink: ranking.bioLink,
+        actionButton: ranking.actionButton,
+      });
     }
     visible.sort((a, b) => b.score - a.score);
     return visible;

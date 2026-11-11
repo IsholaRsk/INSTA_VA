@@ -19,6 +19,38 @@
   var OCR_LANGUAGES = ["fra+eng", "fra", "eng"];
   var DEFAULT_OCR_LANGUAGE = "fra+eng";
   var PROXY_SCHEMES = ["http", "https", "socks5"];
+  // Détection d'un blocage pare-feu Cloudflare (erreur 1020) : ce n'est pas un
+  // challenge, rien ne se débloquera en attendant.
+  var BLOCKED_TITLES = [
+    "sorry, you have been blocked",
+    "you have been blocked",
+    "désolé, vous avez été bloqué",
+    "desole, vous avez ete bloque",
+  ];
+  var CHALLENGE_TITLES = [
+    "just a moment",
+    "attention required",
+    "checking your browser",
+    "un instant",
+    "vérification de sécurité",
+    "verification de securite",
+  ];
+  // Boutons d'action d'un profil : les cliquer à la place d'un lien de bio est
+  // l'erreur la plus coûteuse, car elle « réussit » sans visiter la cible.
+  // Comparaison en minuscules, apostrophes unifiées : « S’abonner » avec une
+  // apostrophe typographique doit être reconnu comme « S'abonner ».
+  var ACTION_LABELS = /^(s'abonner|se desabonner|abonnement|suivre|ne plus suivre|se connecter|connexion|s'inscrire|creer un compte|message|envoyer|partager|enregistrer|j'aime|aimer|commenter|plus|options|fermer|annuler|retour)$/;
+
+  /** Minuscules, sans accents, apostrophes unifiées et espaces normalisés. */
+  function foldLabel(value) {
+    return String(value == null ? "" : value)
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[\u2018\u2019\u02bc\u0060]/g, "'")
+      .toLocaleLowerCase("fr")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
   var HOSTNAME_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/;
   var IPV4_RE = /^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 
@@ -69,9 +101,9 @@
     if (!HOSTNAME_RE.test(host) && !IPV4_RE.test(host)) return { ok: false, message: "Hôte de proxy invalide (sans protocole, chemin ni espace)." };
     if (isBlockedHost(host)) return { ok: false, message: "Hôte local ou privé refusé pour un proxy." };
     if (!Number.isInteger(port) || port < 1 || port > 65535) return { ok: false, message: "Port du proxy invalide (1 à 65535)." };
-    if (!username.trim()) return { ok: false, message: "Nom d’utilisateur Webshare manquant." };
+    if (!username.trim()) return { ok: false, message: "Nom d’utilisateur du proxy manquant." };
     if (username.length > 512 || password.length > 512) return { ok: false, message: "Identifiants du proxy trop longs (512 caractères maximum)." };
-    if (!password) return { ok: false, message: "Mot de passe Webshare manquant." };
+    if (!password) return { ok: false, message: "Mot de passe du proxy manquant." };
 
     return { ok: true, value: { scheme: scheme, host: host, port: port, username: username, password: password } };
   }
@@ -215,6 +247,17 @@
       return proxy && proxy.enabled !== false;
     });
     if (!list.length) return { proxy: null, cursor: 0, index: -1 };
+
+    // Règle 1 : le site juge d'abord le réseau de l'IP. Un proxy résidentiel
+    // déjà testé passe donc avant toute la liste d'hébergeurs. Les proxys non
+    // testés restent éligibles (ils peuvent l'être) ; s'il n'y a aucun
+    // résidentiel connu, la liste complète est utilisée : mieux vaut tenter une
+    // IP datacenter que ne rien faire.
+    var residential = list.filter(function (proxy) { return proxy.ipKind === "residential"; });
+    if (residential.length) {
+      var untested = list.filter(function (proxy) { return !proxy.ipKind; });
+      list = residential.concat(untested);
+    }
 
     var cursor = Number.isInteger(settings.cursor) ? settings.cursor : 0;
     var index;
@@ -567,6 +610,170 @@
     return next;
   }
 
+  // ASN des principaux hébergeurs : une IP sur l'un d'eux est un datacenter,
+  // ce que Cloudflare juge avant tout le reste.
+  var DATACENTER_ASNS = {
+    16276: "OVH", 12876: "Scaleway", 51167: "Contabo", 24940: "Hetzner",
+    197540: "Netcup", 8560: "IONOS", 20773: "Host Europe", 34011: "Host Europe",
+    16509: "Amazon AWS", 14618: "Amazon AWS", 15169: "Google", 396982: "Google Cloud",
+    8075: "Microsoft Azure", 8068: "Microsoft", 14061: "DigitalOcean",
+    63949: "Linode / Akamai", 20473: "Vultr / Choopa", 26347: "DreamHost",
+    46606: "Unified Layer", 26496: "GoDaddy", 32244: "Liquid Web",
+    9009: "M247", 51852: "Private Layer", 62240: "Clouvider",
+    41378: "Kirino", 199524: "G-Core Labs", 13335: "Cloudflare",
+    9002: "RETN", 202425: "IP Volume", 209854: "Zenlayer", 45090: "Tencent",
+    55990: "Huawei Cloud", 37963: "Alibaba Cloud", 45102: "Alibaba Cloud",
+    47890: "Unmanaged Ltd", 200373: "Ipxo", 208091: "Hostinger",
+    47583: "Hostinger", 34241: "Patchstack", 60117: "VSHosting",
+  };
+  var HOSTING_NAME_RE = /(ovh|hetzner|scaleway|contabo|digitalocean|amazon|aws|google cloud|microsoft|azure|linode|akamai|vultr|hostinger|m247|cloudflare|alibaba|tencent|oracle|leaseweb|netcup|ionos|choopa|godaddy)/i;
+
+  /**
+   * Nature d'une IP à partir de son ASN ou du nom de l'organisation.
+   *
+   * C'est le premier critère de refus d'un site protégé : une IP d'hébergeur
+   * est mal notée avant même l'analyse de l'empreinte du navigateur.
+   * Renvoie `{ kind: 'datacenter' | 'residential', asn, org, provider }`.
+   */
+  function classifyIp(info) {
+    var source = info || {};
+    var asn = Number.isInteger(Number(source.asn)) && Number(source.asn) > 0 ? Number(source.asn) : null;
+    var org = String(source.org == null ? "" : source.org).trim();
+    if (asn && DATACENTER_ASNS[asn]) {
+      return { kind: "datacenter", asn: asn, org: org || DATACENTER_ASNS[asn], provider: DATACENTER_ASNS[asn] };
+    }
+    if (HOSTING_NAME_RE.test(org)) {
+      return { kind: "datacenter", asn: asn, org: org, provider: org };
+    }
+    // Aucune information (annuaire muet) : ne pas prétendre « résidentiel ».
+    if (!asn && !org) return { kind: "unknown", asn: null, org: "", provider: null };
+    return { kind: "residential", asn: asn, org: org, provider: null };
+  }
+
+  /** Libellé court pour l'interface : « Datacenter · OVH (AS16276) ». */
+  function describeIpKind(info) {
+    if (!info || !info.kind || info.kind === "unknown") return "Nature d’IP inconnue";
+    if (info.kind === "datacenter") {
+      var provider = info.provider || info.org || "hébergeur";
+      return "Datacenter · " + provider + (info.asn ? " (AS" + info.asn + ")" : "");
+    }
+    return "Résidentiel · " + (info.org || "fournisseur d’accès") + (info.asn ? " (AS" + info.asn + ")" : "");
+  }
+
+  /**
+   * Nature d'une page après chargement : `null` si la page réelle est affichée,
+   * sinon `{ kind: 'blocked' | 'cloudflare', reason }`.
+   *
+   * Un blocage 1020 est une décision déjà prise côté serveur ; un challenge est
+   * une vérification en cours. Confondre les deux fait attendre pour rien.
+   */
+  function detectPageGate(snapshot) {
+    var source = snapshot || {};
+    var title = String(source.title == null ? "" : source.title).toLocaleLowerCase("fr");
+    var html = String(source.html == null ? "" : source.html).toLocaleLowerCase("fr");
+    if (!title && !html) return null;
+
+    for (var i = 0; i < BLOCKED_TITLES.length; i += 1) {
+      if (title.indexOf(BLOCKED_TITLES[i]) >= 0) return { kind: "blocked", reason: "titre « " + String(source.title).slice(0, 80) + " »" };
+    }
+    if (html.indexOf("error code: 1020") >= 0 || html.indexOf("error 1020") >= 0) {
+      return { kind: "blocked", reason: "erreur 1020" };
+    }
+    if (html.indexOf("cloudflare ray id") >= 0 && html.indexOf("you are unable to access") >= 0) {
+      return { kind: "blocked", reason: "page de blocage Cloudflare" };
+    }
+    for (var j = 0; j < CHALLENGE_TITLES.length; j += 1) {
+      if (title.indexOf(CHALLENGE_TITLES[j]) >= 0) return { kind: "cloudflare", reason: "titre « " + String(source.title).slice(0, 80) + " »" };
+    }
+    if (html.indexOf("challenges.cloudflare.com") >= 0 || html.indexOf("cf-challenge") >= 0 ||
+        html.indexOf("cf_chl_opt") >= 0 || html.indexOf("cf-browser-verification") >= 0) {
+      return { kind: "cloudflare", reason: "marqueur de vérification" };
+    }
+    return null;
+  }
+
+  /**
+   * Reconstruit la destination réelle d'un lien en bio Instagram.
+   *
+   * Instagram ne redirige pas vers la cible : il passe par
+   * `l.instagram.com/?u=<destination>` (mobile) ou `instagram.com/l.php?u=…`.
+   * Sans ce décodage, le cycle se termine sur une page d'avertissement et la
+   * bio n'est jamais réellement visitée. Fonction pure, testable hors navigateur.
+   */
+  function unwrapRedirectUrl(rawUrl) {
+    var candidate = String(rawUrl == null ? "" : rawUrl).trim();
+    if (!candidate) return "";
+    for (var hop = 0; hop < 3; hop += 1) {
+      var parsed;
+      try { parsed = new URL(candidate); } catch (error) { return candidate; }
+      var host = parsed.hostname.toLowerCase();
+      var isInstagram = /(^|\.)instagram\.com$/.test(host) && (host.indexOf("l.") === 0 || parsed.pathname === "/l.php");
+      var isFacebook = /(^|\.)facebook\.com$/.test(host) && parsed.pathname === "/l.php";
+      if (!isInstagram && !isFacebook) return candidate;
+      var wrapped = parsed.searchParams.get("u") || parsed.searchParams.get("url") || "";
+      if (!wrapped) return candidate;
+      var decoded = wrapped;
+      try { decoded = decodeURIComponent(wrapped); } catch (error) { decoded = wrapped; }
+      if (!decoded || decoded === candidate) return candidate;
+      candidate = decoded;
+    }
+    return candidate;
+  }
+
+  /**
+   * Un lien en bio Instagram n'est pas une balise <a> : c'est un élément
+   * cliquable dont le texte est l'URL affichée, souvent tronquée en un mot
+   * (« shop », « maboutique »).
+   *
+   * Un simple mot n'est retenu que s'il n'est pas un libellé d'action : sans
+   * cela, « Message » ou « Suivre » seraient pris pour des liens de bio.
+   */
+  function looksLikeBioLinkText(text) {
+    var raw = String(text == null ? "" : text).trim();
+    if (!raw || raw.length > 64) return false;
+    // URL complète ou domaine : toujours un lien de destination.
+    if (/^(?:[a-z0-9-]+\.)+[a-z]{2,24}(?:\/\S*)?$/i.test(raw)) return true;
+    // Chemin de type « lien.bio/xxx ».
+    if (/^[a-z0-9][a-z0-9._-]{1,40}\/\S*$/i.test(raw)) return true;
+    // Simple mot court : éligible seulement s'il ne désigne pas une action.
+    if (/^[a-z0-9][a-z0-9._-]*$/i.test(raw) && raw.length <= 32) {
+      return !ACTION_LABELS.test(foldLabel(raw));
+    }
+    return false;
+  }
+
+  /**
+   * Classe un élément cliquable. La surface et la longueur du texte ne doivent
+   * jamais décider à la place du sens : c'est ce qui faisait cliquer
+   * « S'abonner » au lieu du lien en bio quand celui-ci était court.
+   *
+   * @param {{text?:string, href?:string, area?:number, kind?:string,
+   *          inNavigation?:boolean, hasClickHandler?:boolean, tagName?:string}} element
+   */
+  function scoreClickable(element) {
+    var source = element || {};
+    var text = String(source.text == null ? "" : source.text).trim();
+    var href = String(source.href == null ? "" : source.href);
+    var area = Number(source.area) || 0;
+    var inNavigation = source.inNavigation === true;
+    var action = ACTION_LABELS.test(foldLabel(text));
+    // Le texte seul ne suffit pas : il faut un élément actionnable.
+    var actionable = source.hasClickHandler === true || source.isControl === true ||
+      /^(a|button|summary)$/i.test(String(source.tagName || "")) || Boolean(href);
+    var bio = actionable && looksLikeBioLinkText(text) && !inNavigation;
+
+    var score = 0;
+    score += bio ? 9000 : 0;
+    score += inNavigation ? 0 : 1800;
+    score += href ? 160 : 0;
+    score -= action ? 7000 : 0;
+    score += Math.min(text.length, 40) * 10;
+    score += Math.min(area / 200, 900);
+    if (String(source.kind || "") === "bouton" && !bio) score += 200;
+
+    return { score: Math.round(score), bioLink: bio, actionButton: action };
+  }
+
   function sanitizeSavedProxy(raw) {
     if (!raw || typeof raw !== "object" || typeof raw.id !== "string" || !raw.id) return null;
     var validation = validateProxyEntry(raw);
@@ -592,6 +799,8 @@
       lastError: text(raw.lastError, 200),
       lastTestAt: text(raw.lastTestAt, 40),
       lastTestIp: text(raw.lastTestIp, 80),
+      // Nature de l'IP constatée au dernier test : pilote la priorité de rotation.
+      ipKind: /^(residential|datacenter)$/.test(String(raw.ipKind || "")) ? String(raw.ipKind) : "",
       lastTestError: text(raw.lastTestError, 200),
       disabledReason: text(raw.disabledReason, 200),
       createdAt: text(raw.createdAt, 40),
@@ -678,6 +887,12 @@
     maskUsername: maskUsername,
     pickProxy: pickProxy,
     applyProxyOutcome: applyProxyOutcome,
+    detectPageGate: detectPageGate,
+    classifyIp: classifyIp,
+    describeIpKind: describeIpKind,
+    unwrapRedirectUrl: unwrapRedirectUrl,
+    looksLikeBioLinkText: looksLikeBioLinkText,
+    scoreClickable: scoreClickable,
     sanitizeSavedProxy: sanitizeSavedProxy,
     sanitizeProxySettings: sanitizeProxySettings,
     normalizeOcrLanguage: normalizeOcrLanguage,
