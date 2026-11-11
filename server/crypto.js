@@ -58,6 +58,8 @@ export function constantTimeEqual(left, right) {
   return safeEqualBuffers(Buffer.from(String(left), 'utf8'), Buffer.from(String(right), 'utf8'));
 }
 
+const derivedKeyCache = new Map();
+
 /**
  * Dérive une clé AES-256 depuis une valeur d'environnement.
  * Une valeur base64/hex de 32 octets est utilisée telle quelle ;
@@ -66,10 +68,20 @@ export function constantTimeEqual(left, right) {
 export function deriveBoxKey(secret) {
   const raw = String(secret || '');
   if (!raw) throw new Error('Clé de chiffrement absente.');
+  const cached = derivedKeyCache.get(raw);
+  if (cached) return cached;
   const candidate = Buffer.from(raw, 'base64');
-  if (candidate.length === 32) return candidate;
-  if (/^[0-9a-f]{64}$/i.test(raw)) return Buffer.from(raw, 'hex');
-  return scryptSync(raw, 'instava-proxy-key-v1', 32, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, maxmem: MAX_MEMORY });
+  let key;
+  if (candidate.length === 32) {
+    key = candidate;
+  } else if (/^[0-9a-f]{64}$/i.test(raw)) {
+    key = Buffer.from(raw, 'hex');
+  } else {
+    key = scryptSync(raw, 'instava-proxy-key-v1', 32, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, maxmem: MAX_MEMORY });
+  }
+  if (derivedKeyCache.size >= 8) derivedKeyCache.clear();
+  derivedKeyCache.set(raw, key);
+  return key;
 }
 
 /** Chiffrement authentifié : iv.aléatoire + tag + texte chiffré, encodés en base64url. */

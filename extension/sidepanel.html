@@ -102,9 +102,14 @@
       </section>
 
       <section class="card proxy-card">
-        <div class="section-title">
-          <h2>Proxys Webshare</h2>
-          <span id="proxySummary" class="selection-summary">Chargement…</span>
+        <div class="section-title list-heading">
+          <div>
+            <h2>Proxys (Webshare, Rayobyte…)</h2>
+            <span id="proxySummary" class="selection-summary">Chargement…</span>
+          </div>
+          <div class="button-row">
+            <button id="clearProxies" class="text-button" type="button" hidden>Vider la liste</button>
+          </div>
         </div>
         <label class="check-row proxy-toggle">
           <input id="useRotatingProxy" type="checkbox" checked>
@@ -122,7 +127,7 @@
           <span>Désactiver un proxy après 3 échecs consécutifs</span>
         </label>
 
-        <p id="emptyProxies" class="empty-targets" hidden>Aucun proxy enregistré. Colle une liste Webshare ci-dessous.</p>
+        <p id="emptyProxies" class="empty-targets" hidden>Aucun proxy enregistré. Colle ta liste Webshare ou Rayobyte dans « Import en masse » ci-dessous.</p>
         <div id="proxyList" class="proxy-list" aria-live="polite"></div>
 
         <form id="proxyForm" class="proxy-editor">
@@ -130,7 +135,7 @@
           <div class="proxy-grid">
             <div class="proxy-field-wide">
               <label for="proxyHost">Hôte</label>
-              <input id="proxyHost" type="text" maxlength="253" spellcheck="false" autocomplete="off" placeholder="proxy.webshare.io">
+              <input id="proxyHost" type="text" maxlength="253" spellcheck="false" autocomplete="off" placeholder="us-east.gw.rayobyte.com ou proxy.webshare.io">
             </div>
             <div>
               <label for="proxyPort">Port</label>
@@ -157,11 +162,12 @@
             <button id="cancelProxyEdit" class="text-button" type="button" hidden>Annuler</button>
             <button id="saveProxy" class="primary" type="submit">Ajouter à la liste</button>
           </div>
+          <p id="proxyFormFeedback" class="import-feedback" role="status" aria-live="polite" hidden></p>
         </form>
 
         <form id="proxyImportForm" class="proxy-import">
           <label for="proxyImportLines">Import en masse <span>(un proxy par ligne, séparateur « , » ou « ; » accepté)</span></label>
-          <textarea id="proxyImportLines" rows="4" spellcheck="false" placeholder="proxy.webshare.io:8000:user:pass&#10;user:pass@203.0.113.9:9000&#10;proxy2.webshare.io:8001"></textarea>
+          <textarea id="proxyImportLines" rows="4" spellcheck="false" placeholder="user:pass-country-US@us-east.gw.rayobyte.com:8000&#10;la.residential.rayobyte.com:8000:user:pass-session-abc1&#10;proxy.webshare.io:8000:user:pass"></textarea>
           <div class="proxy-grid">
             <div class="proxy-field-wide">
               <label for="proxyDefaultUsername">Identifiant commun <span>(si absent des lignes)</span></label>
@@ -175,6 +181,7 @@
           <div class="form-actions">
             <button id="importProxies" class="secondary" type="submit">Importer la liste</button>
           </div>
+          <p id="proxyImportFeedback" class="import-feedback" role="status" aria-live="polite" hidden></p>
         </form>
 
         <p class="hint">Formats acceptés : <code>host:port:user:pass</code>, <code>user:pass@host:port</code> ou <code>host:port</code> avec les identifiants communs. Le proxy activé est appliqué juste avant le clic, puis le réglage Chrome précédent est restauré après la redirection; Chrome l’applique à tout le profil pendant cette fenêtre. Les identifiants restent dans <code>chrome.storage.local</code> sur cet appareil, ne partent jamais vers un serveur et ne sont pas écrits dans les logs.</p>

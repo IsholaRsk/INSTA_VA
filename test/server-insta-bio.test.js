@@ -10,7 +10,7 @@ import { loadConfig } from '../server/config.js';
 import { openDatabase } from '../server/db.js';
 import { createStore } from '../server/store.js';
 import { createLogger } from '../server/logger.js';
-import { attachSecretKey, parseProxyImport, proxyRow } from '../server/proxies.js';
+import { attachSecretKey, existingProxySignatures, parseProxyImport, proxyGatewayHint, proxyRow } from '../server/proxies.js';
 import { unwrapRedirectUrl, clickableCollectorSource } from '../server/browser.js';
 
 const silentLogger = createLogger('error', { log() {}, warn() {}, error() {} });
@@ -57,6 +57,83 @@ test('le format avec / et paramètres (copié depuis un mail) est nettoyé', () 
   assert.equal(result.errors.length, 0);
   assert.equal(result.entries[0].port, 8000);
   assert.equal(result.entries[0].host, 'us-east.gw.rayobyte.com');
+});
+
+test('les sessions sticky Rayobyte sur la même passerelle et le même port ne sont pas fusionnées', () => {
+  const lines = ['s1a2b3', 's4c5d6', 's7e8f9'].map((sid) =>
+    `la.residential.rayobyte.com:8000:uti1lisateurfictif:motdepassefictif-country-FR-session-${sid}`);
+  const result = parseProxyImport(lines.join('\n'));
+  assert.equal(result.errors.length, 0);
+  assert.equal(result.duplicates, 0);
+  assert.equal(result.entries.length, 3);
+  assert.equal(proxyGatewayHint(result.entries[0]), 'FR · session s1a2b3');
+  assert.ok(!proxyGatewayHint(result.entries[0]).includes('motdepassefictif'), 'aucun secret exposé dans l’indice');
+
+  // Une vraie ligne dupliquée (même session) reste détectée comme doublon.
+  const withDup = parseProxyImport([...lines, lines[1]].join('\n'));
+  assert.equal(withDup.entries.length, 3);
+  assert.equal(withDup.duplicates, 1);
+});
+
+test('les identifiants Rayobyte contenant @ (e-mail) dans host:port:user:pass sont acceptés', () => {
+  const samples = [
+    [
+      'la.residential.rayobyte.com:8000:client@domaine.fr:motdepassefictif-country-US',
+      'la.residential.rayobyte.com', 8000, 'client@domaine.fr', 'motdepassefictif-country-US',
+    ],
+    [
+      'la.residential.rayobyte.com:8000:client@domaine.fr:1234',
+      'la.residential.rayobyte.com', 8000, 'client@domaine.fr', '1234',
+    ],
+    [
+      'la.residential.rayobyte.com:8000:uti1lisateurfictif:mot@passe-country-FR',
+      'la.residential.rayobyte.com', 8000, 'uti1lisateurfictif', 'mot@passe-country-FR',
+    ],
+    [
+      'client@domaine.fr:motdepassefictif-country-US@us-east.gw.rayobyte.com:8000',
+      'us-east.gw.rayobyte.com', 8000, 'client@domaine.fr', 'motdepassefictif-country-US',
+    ],
+  ];
+  for (const [line, host, port, username, password] of samples) {
+    const result = parseProxyImport(line);
+    assert.equal(result.errors.length, 0, `${line} rejeté : ${result.errors[0]?.message}`);
+    assert.equal(result.entries.length, 1);
+    assert.equal(result.entries[0].host, host);
+    assert.equal(result.entries[0].port, port);
+    assert.equal(result.entries[0].username, username);
+    assert.equal(result.entries[0].password, password);
+  }
+});
+
+test('les séparateurs « , », « ; » et tabulations sont acceptés sans couper les mots de passe', () => {
+  const separated = parseProxyImport(
+    'uti1lisateurfictif:motdepassefictif-session-1@us-east.gw.rayobyte.com:8000, '
+    + 'uti1lisateurfictif:motdepassefictif-session-2@us-east.gw.rayobyte.com:8000; '
+    + 'us-east.gw.rayobyte.com\t8001\tuti1lisateurfictif\tmotdepassefictif',
+  );
+  assert.equal(separated.errors.length, 0);
+  assert.equal(separated.entries.length, 3);
+
+  const semicolonPass = parseProxyImport('us-east.gw.rayobyte.com:8000:uti1lisateurfictif:mot;de,passe');
+  assert.equal(semicolonPass.errors.length, 0);
+  assert.equal(semicolonPass.entries.length, 1);
+  assert.equal(semicolonPass.entries[0].password, 'mot;de,passe');
+});
+
+test('les signatures existantes côté serveur distinguent les sessions sticky Rayobyte', () => {
+  const ctx = setup();
+  try {
+    const owner = ctx.store.createUser({ email: 'gw@exemple.test', passwordHash: 'h', role: 'owner' });
+    const lines = ['a1', 'b2'].map((sid) =>
+      `uti1lisateurfictif:motdepassefictif-country-US-session-${sid}@us-east.gw.rayobyte.com:8000`);
+    const parsed = parseProxyImport(lines.join('\n'));
+    ctx.store.insertProxies(owner.id, parsed.entries.map((entry) =>
+      proxyRow(entry, ctx.config.secretKey, randomUUID(), proxyGatewayHint(entry))));
+    const signatures = existingProxySignatures(ctx.store, owner.id, ctx.config.secretKey);
+    assert.equal(signatures.size, 2);
+  } finally {
+    ctx.clean();
+  }
 });
 
 /* ------------------------ vidage de la liste entière ----------------------- */

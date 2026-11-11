@@ -632,6 +632,9 @@ function renderProxies() {
     const tags = node('div', 'proxy-tags');
     tags.append(node('span', 'proxy-tag', proxy.scheme.toUpperCase()));
     if (proxy.username) tags.append(node('span', 'proxy-tag', proxy.username));
+    if (proxy.label && !/^Proxy \d+$/i.test(proxy.label) && proxy.label !== proxy.host) {
+      tags.append(node('span', 'proxy-tag', proxy.label));
+    }
     if (!proxy.enabled) tags.append(node('span', 'proxy-tag is-off', 'désactivé'));
     else if (proxy.consecutive_failures) tags.append(node('span', 'proxy-tag is-warn', `${proxy.consecutive_failures} échec(s) de suite`));
     const rate = proxyPercent(proxy);

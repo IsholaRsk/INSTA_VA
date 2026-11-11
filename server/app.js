@@ -10,12 +10,15 @@ import {
   attachSecretKey,
   decryptProxyRow,
   describeExitIp,
+  existingProxySignatures,
   MAX_PROXY_IMPORT_BYTES,
   MAX_PROXY_IMPORT_CHARS,
   nextProxy,
   parseProxyImport,
   probeProxy,
+  proxyGatewayHint,
   proxyRow,
+  proxySignature,
   validateProxyEntry,
 } from './proxies.js';
 import { buildVisitSchedule, clicksAllowedToday, plannedCountForDay } from './schedule.js';
@@ -322,20 +325,37 @@ export function createApp({
       throw new HttpError(400, detail ? `Aucun proxy valide. ${detail}` : 'Aucun proxy valide dans le texte fourni.');
     }
 
-    // Déduplication avec la liste existante (même hôte + port + identifiant).
-    const existing = new Set(store.listProxies(user.id).map((proxy) => `${proxy.host}:${proxy.port}:${proxy.username}`));
+    // Déduplication complète (protocole, hôte, port, identifiant et mot de passe de session).
+    const existing = existingProxySignatures(store, user.id, config.secretKey);
     // Total de lignes réellement fournies, doublons du fichier compris : c'est
     // la seule base honnête pour un compte rendu (« 9 rejetées sur 17 » mentait).
     const totalLines = parsed.entries.length + parsed.errors.length + parsed.duplicates;
     const checked = [];
+    const validatedHosts = new Map();
     for (const entry of parsed.entries) {
-      const signature = `${entry.host}:${entry.port}:${maskValue(entry.username)}`;
+      const signature = proxySignature(entry);
       if (existing.has(signature)) { parsed.duplicates += 1; continue; }
       try {
-        const valid = await validateProxyEntry(entry);
-        checked.push(valid);
+        if (validatedHosts.has(entry.host)) {
+          const hostError = validatedHosts.get(entry.host);
+          if (hostError) throw hostError;
+          checked.push({
+            scheme: entry.scheme,
+            host: entry.host,
+            port: Number(entry.port),
+            username: entry.username,
+            password: entry.password,
+          });
+        } else {
+          const valid = await validateProxyEntry(entry);
+          validatedHosts.set(entry.host, null);
+          checked.push(valid);
+        }
         existing.add(signature);
       } catch (error) {
+        if (!validatedHosts.has(entry.host) && /hôte|publique/i.test(String(error?.message || ''))) {
+          validatedHosts.set(entry.host, error);
+        }
         parsed.errors.push({ line: entry.line || 0, message: error.message });
       }
     }
@@ -357,7 +377,10 @@ export function createApp({
     }
 
     store.insertProxies(user.id, checked.map((entry, index) => proxyRow(
-      entry, config.secretKey, randomUUID(), String(entry.label || `Proxy ${index + 1}`),
+      entry,
+      config.secretKey,
+      randomUUID(),
+      String(entry.label || proxyGatewayHint(entry) || `Proxy ${index + 1}`),
     )));
     const state = store.getProxyState(user.id);
     // Le premier import active la rotation : sinon rien ne serait utilisé.
