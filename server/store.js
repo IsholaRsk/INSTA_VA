@@ -333,9 +333,21 @@ export function createStore(db) {
       return Number(row?.total || 0);
     },
 
+    /** Total de clics depuis toujours, toutes cibles confondues (base des gains). */
+    clicksTotal(userId) {
+      const row = stmt('SELECT COALESCE(SUM(clicks), 0) AS total FROM daily_clicks WHERE user_id = ?').get(userId);
+      return Number(row?.total || 0);
+    },
+
     dailyClicksForUser(userId, day) {
       const row = stmt('SELECT COALESCE(SUM(clicks), 0) AS total FROM daily_clicks WHERE user_id = ? AND day = ?')
         .get(userId, day);
+      return Number(row?.total || 0);
+    },
+
+    clicksTotalForTarget(userId, targetId) {
+      const row = stmt('SELECT COALESCE(SUM(clicks), 0) AS total FROM daily_clicks WHERE user_id = ? AND target_id = ?')
+        .get(userId, targetId);
       return Number(row?.total || 0);
     },
 

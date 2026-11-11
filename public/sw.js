@@ -1,12 +1,14 @@
 // À incrémenter à chaque changement d'interface : sinon le téléphone garde
 // l'ancienne version en cache et n'affiche jamais les nouveautés.
-const CACHE_NAME = 'instava-bot-v3';
+const CACHE_NAME = 'instava-bot-v4';
 const CACHE_PREFIX = 'instava-';
 const SHELL = [
   '/',
   '/index.html',
-  '/styles.css',
-  '/app.js',
+  '/app/theme.css',
+  '/app/main.js',
+  '/vendor/react.js',
+  '/vendor/react-dom.js',
   '/manifest.webmanifest',
   '/icon.svg',
   '/icon-192.png',

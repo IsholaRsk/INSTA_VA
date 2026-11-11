@@ -414,6 +414,33 @@ Deux conséquences concrètes :
 
 **Le bouton Tester te donne désormais ce verdict.** Après un test, chaque proxy affiche la nature de son IP de sortie : `Datacenter · OVH (AS16276)`, `Résidentiel · Free SAS`, ou `Nature d’IP inconnue`. Le compte rendu global indique combien de tes proxys sortent par un hébergeur — s'ils le font tous, la question n'est plus « combien de proxys » mais « quel type de proxys ».
 
+### Interface React et barème des gains
+
+L'interface principale est une application React servie à la racine (`/`). L'ancien tableau de bord reste accessible à **`/legacy.html`** : rien n'a été supprimé.
+
+**Pourquoi pas de build.** Le VPS exécute `npm ci --omit=dev` dans l'image Docker : aucun outil de compilation n'y est disponible. L'interface est donc écrite en JavaScript directement lisible par le navigateur (`createElement`, pas de JSX) et React est servi en local depuis `public/vendor/`. Aucun CDN : la CSP du serveur (`script-src 'self'`) l'interdit, et c'est préférable pour un outil qui manipule des identifiants de proxy.
+
+Modifier l'interface : éditer `ui/src/`, puis publier.
+
+```bash
+node scripts/copy-ui.mjs   # copie ui/src → public/app
+```
+
+Un test échoue si `public/app` diverge de `ui/src` : l'oubli de cette commande est détecté avant le déploiement.
+
+**Le barème.** Chaque tranche de 250 clics est rémunérée. Les deux premières valent 12 $ chacune, les suivantes 8 $.
+
+| Clics | Gain | Calcul |
+|---|---|---|
+| 250 | 12 $ | 1 tranche × 12 |
+| 500 | 24 $ | 2 tranches × 12 |
+| 750 | 32 $ | 24 $ + 1 tranche × 8 |
+| 1 000 | 40 $ | 24 $ + 2 tranches × 8 |
+
+Le calcul se fait par tranches entières (300 clics rapportent 12 $, pas une fraction de la suivante) et ne baisse jamais quand les clics augmentent. Le solde affiché dans la carte vient du **total de clics réel** (`clicksTotal` de `/api/visits`), jamais d'une valeur saisie.
+
+**Responsive.** Mobile d'abord (≤ 430 px, comme la capture), puis deux colonnes à partir de 900 px : la carte et les actions à gauche, les listes à droite. Points de rupture à 900 px et 380 px, barre de navigation flottante, `prefers-reduced-motion` respecté.
+
 ### Liste de proxys : import unique et vidage en une action
 
 Une liste de proxys se remplace, elle ne s'édite pas. Coller la liste Rayobyte suffit :
