@@ -11,7 +11,7 @@ import { openDatabase } from '../server/db.js';
 import { createStore } from '../server/store.js';
 import { createLogger } from '../server/logger.js';
 import { attachSecretKey, existingProxySignatures, parseProxyImport, proxyGatewayHint, proxyRow } from '../server/proxies.js';
-import { unwrapRedirectUrl, clickableCollectorSource } from '../server/browser.js';
+import { unwrapRedirectUrl, clickableCollectorSource, isDirectDestinationRedirect } from '../server/browser.js';
 
 const silentLogger = createLogger('error', { log() {}, warn() {}, error() {} });
 
@@ -252,3 +252,100 @@ test('un bouton d’action ne prend jamais la place d’un lien de destination',
     globalThis.document = previous.document;
   }
 });
+
+test('extension : collectPageClickablesInDom fonctionne dans une page isolée sans InstaVAUtils et préserve la lettre s', async () => {
+  await import('../extension/bot-utils.js');
+  const extUtils = globalThis.InstaVAUtils;
+  const { JSDOM } = await import('jsdom');
+  const dom = new JSDOM(`<html><body>
+    <nav><a href="/privacy">Confidentialité</a></nav>
+    <main>
+      <a href="https://onlyfans.com/heyitslanaaa/c194">getallink.com/butter</a>
+      <button>S'abonner</button>
+      <button>Plus   d'infos</button>
+    </main>
+  </body></html>`, {
+    url: 'https://getallink.com/butter',
+    pretendToBeVisual: true,
+    runScripts: 'outside-only',
+  });
+  dom.window.HTMLElement.prototype.getBoundingClientRect = () =>
+    ({ width: 220, height: 48, top: 20, left: 20, right: 240, bottom: 68 });
+
+  // Vérifie que la page inspectée n'a pas accès à InstaVAUtils (comme dans Chrome Runtime.evaluate).
+  assert.equal(dom.window.InstaVAUtils, undefined);
+
+  const primaryExpr = `(${extUtils.collectPageClickablesInDom.toString()})(${JSON.stringify({
+    selector: 'a[href], [role="link"], button, [role="button"], summary',
+    primaryOnly: true,
+  })})`;
+  const rawCandidates = dom.window.eval(primaryExpr);
+  assert.equal(rawCandidates.length, 4);
+  const ranked = extUtils.rankPrimaryClickables(rawCandidates);
+  assert.ok(ranked.picked);
+  assert.equal(ranked.picked.text, 'getallink.com/butter');
+  assert.equal(ranked.picked.bioLink, true);
+
+  // Vérifie que les espaces multiples sont normalisés sans effacer la lettre « s ».
+  const exactExpr = `(${extUtils.collectPageClickablesInDom.toString()})(${JSON.stringify({
+    selector: 'a[href], [role="link"], button, [role="button"], summary',
+    exactLabel: "plus d'infos",
+  })})`;
+  const exactMatches = dom.window.eval(exactExpr);
+  assert.equal(exactMatches.length, 1);
+  assert.equal(exactMatches[0].text, "Plus d'infos");
+});
+
+test('redirection directe smart-link (ex. getallink.com/butter → onlyfans.com/…/c194) reconnue côté extension et serveur', async () => {
+  await import('../extension/bot-utils.js');
+  const extUtils = globalThis.InstaVAUtils;
+
+  for (const check of [extUtils.isDirectDestinationRedirect, isDirectDestinationRedirect]) {
+    assert.equal(
+      check('https://getallink.com/butter', 'https://onlyfans.com/heyitslanaaa/c194', ''),
+      true,
+    );
+    // Si un libellé précis est demandé, on ne court-circuite jamais la recherche du bouton.
+    assert.equal(
+      check('https://getallink.com/butter', 'https://onlyfans.com/heyitslanaaa/c194', "Plus d'infos"),
+      false,
+    );
+    // Reste sur le domaine initial (page d'atterrissage avec bouton à cliquer) : clic requis.
+    assert.equal(
+      check('https://getallink.com/butter', 'https://www.getallink.com/butter', ''),
+      false,
+    );
+    // Redirection vers un hub link-in-bio intermédiaire : clic toujours requis.
+    assert.equal(
+      check('https://bit.ly/abc', 'https://linktr.ee/heyitslanaaa', ''),
+      false,
+    );
+    // Accès direct au domaine final sans redirection inter-domaine : clic normal.
+    assert.equal(
+      check('https://onlyfans.com/heyitslanaaa', 'https://onlyfans.com/heyitslanaaa/c194', ''),
+      false,
+    );
+  }
+});
+
+test('extension : proxyLabel distingue les sessions Rayobyte et pickProxy évite la répétition immédiate en mode aléatoire', async () => {
+  await import('../extension/bot-utils.js');
+  const extUtils = globalThis.InstaVAUtils;
+
+  const parsed = extUtils.parseProxyLines([
+    'uti1lisateurfictif:motdepassefictif-country-US-session-alpha1@us-east.gw.rayobyte.com:8000',
+    'uti1lisateurfictif:motdepassefictif-country-US-session-bravo2@us-east.gw.rayobyte.com:8000',
+  ].join('\n'));
+  assert.equal(parsed.entries.length, 2);
+  const proxies = parsed.entries.map((entry, idx) => ({ ...entry, id: `p${idx}`, enabled: true }));
+
+  assert.equal(extUtils.proxyLabel(proxies[0]), 'http://us-east.gw.rayobyte.com:8000 · US · session alpha1');
+  assert.equal(extUtils.proxyLabel(proxies[1]), 'http://us-east.gw.rayobyte.com:8000 · US · session bravo2');
+
+  // Même si le générateur aléatoire renvoie toujours 0, lastProxyId impose l'autre session.
+  const first = extUtils.pickProxy(proxies, { mode: 'random', lastProxyId: '' }, () => 0);
+  const second = extUtils.pickProxy(proxies, { mode: 'random', lastProxyId: first.proxy.id }, () => 0);
+  assert.equal(first.proxy.id, 'p0');
+  assert.equal(second.proxy.id, 'p1');
+});
+
