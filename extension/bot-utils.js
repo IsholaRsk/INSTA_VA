@@ -294,7 +294,10 @@
   function proxyLabel(proxy) {
     if (!proxy) return "";
     var name = String(proxy.name == null ? "" : proxy.name).trim();
-    return name || proxyEndpoint(proxy);
+    if (name) return name;
+    var endpoint = proxyEndpoint(proxy);
+    var hint = proxyGatewayHint(proxy);
+    return hint ? endpoint + " · " + hint : endpoint;
   }
 
   function proxyCredentialsLine(proxy) {
@@ -334,10 +337,16 @@
     var cursor = Number.isInteger(settings.cursor) ? settings.cursor : 0;
     var index;
     if (settings.mode === "random") {
+      var pool = list;
+      if (settings.lastProxyId && list.length > 1) {
+        var different = list.filter(function (proxy) { return proxy.id !== settings.lastProxyId; });
+        if (different.length) pool = different;
+      }
       var source = typeof random === "function" ? random : Math.random;
       var value = Number(source());
       if (!Number.isFinite(value)) value = 0;
-      index = Math.min(list.length - 1, Math.max(0, Math.floor(value * list.length)));
+      var pickedInPool = pool[Math.min(pool.length - 1, Math.max(0, Math.floor(value * pool.length)))];
+      index = Math.max(0, list.indexOf(pickedInPool));
     } else {
       index = ((cursor % list.length) + list.length) % list.length;
     }
@@ -846,6 +855,201 @@
     return { score: Math.round(score), bioLink: bio, actionButton: action };
   }
 
+  /**
+   * Collecteur autonome sérialisable via `.toString()` pour `Runtime.evaluate` :
+   * n'appelle aucune variable externe de l'extension (car il tourne dans le contexte
+   * isolé de la page inspectée, où `InstaVAUtils` n'existe pas).
+   */
+  function collectPageClickablesInDom(options) {
+    var settings = options || {};
+    var selector = String(settings.selector || 'a[href], [role="link"], button, input[type="button"], input[type="submit"], [role="button"], summary');
+    var exactLabel = typeof settings.exactLabel === "string" ? settings.exactLabel : null;
+    var primaryOnly = Boolean(settings.primaryOnly);
+    var NAV = 'header, nav, footer, aside, [role="navigation"], [role="banner"], [role="contentinfo"]';
+
+    function normalize(value) {
+      return String(value || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLocaleLowerCase("fr")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    function labelOf(element) {
+      var tag = String(element.tagName || "").toUpperCase();
+      if (tag === "INPUT") {
+        return String(element.value || element.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+      }
+      var visibleText = String(element.innerText != null ? element.innerText : (element.textContent || "")).replace(/\s+/g, " ").trim();
+      return visibleText || String(element.getAttribute("aria-label") || element.getAttribute("title") || "").replace(/\s+/g, " ").trim();
+    }
+
+    function isVisible(element) {
+      var rect = element.getBoundingClientRect();
+      var style = window.getComputedStyle(element);
+      if (!rect.width || !rect.height || rect.bottom <= 0 || rect.right <= 0 ||
+          rect.top >= window.innerHeight || rect.left >= window.innerWidth) return false;
+      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+      if (style.pointerEvents === "none" || element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true") return false;
+      return true;
+    }
+
+    function kindOf(element) {
+      var tag = String(element.tagName || "").toUpperCase();
+      if (tag === "A" || element.getAttribute("role") === "link") return "lien";
+      if (tag === "SUMMARY") return "résumé";
+      return "bouton";
+    }
+
+    function describe(element) {
+      var rect = element.getBoundingClientRect();
+      var left = Math.max(0, rect.left);
+      var right = Math.min(window.innerWidth, rect.right);
+      var top = Math.max(0, rect.top);
+      var bottom = Math.min(window.innerHeight, rect.bottom);
+      var tag = String(element.tagName || "").toUpperCase();
+      var rawHref = tag === "A" ? String(element.href || "") : "";
+      var dataIndex = element.dataset ? Number(element.dataset.instavaIndex) : Number(element.getAttribute("data-instava-index"));
+      return {
+        index: dataIndex,
+        x: (left + right) / 2,
+        y: (top + bottom) / 2,
+        href: rawHref,
+        text: labelOf(element).slice(0, 160),
+        type: kindOf(element),
+        area: (right - left) * (bottom - top),
+        tagName: tag,
+        hasClickHandler: typeof element.onclick === "function" ||
+          element.hasAttribute("onclick") || element.getAttribute("tabindex") !== null,
+        isControl: tag === "BUTTON" || element.getAttribute("role") === "button" ||
+          (tag === "INPUT" && /^(button|submit)$/i.test(String(element.type || ""))),
+        inNavigation: Boolean(element.closest && element.closest(NAV)),
+      };
+    }
+
+    var elements = Array.from(document.querySelectorAll(selector));
+    elements.forEach(function (element, idx) {
+      if (element.dataset) element.dataset.instavaIndex = String(idx);
+      else if (element.setAttribute) element.setAttribute("data-instava-index", String(idx));
+    });
+
+    if (exactLabel !== null) {
+      return elements
+        .filter(function (element) { return isVisible(element) && normalize(labelOf(element)) === exactLabel; })
+        .map(function (element) { return describe(element); });
+    }
+
+    var currentBase = String((window.location && window.location.href) || "").split("#")[0];
+    var visible = [];
+    for (var i = 0; i < elements.length; i += 1) {
+      var element = elements[i];
+      if (!isVisible(element)) continue;
+      var tag = String(element.tagName || "").toUpperCase();
+      if (primaryOnly && tag === "A") {
+        var rawHref = String(element.href || "");
+        if (!rawHref) continue;
+        if (rawHref.split("#")[0] === currentBase && (rawHref.indexOf("#") >= 0 || rawHref === "#")) continue;
+        if (/^(javascript:|mailto:|tel:)/i.test(String(element.getAttribute("href") || ""))) continue;
+      }
+      visible.push(describe(element));
+    }
+    return visible;
+  }
+
+  /**
+   * Classe côté extension (hors page) les éléments visibles collectés par
+   * `collectPageClickablesInDom` et désigne le candidat principal.
+   */
+  function rankPrimaryClickables(candidates) {
+    var list = Array.isArray(candidates) ? candidates : [];
+    var links = list.map(function (item) {
+      var ranking = scoreClickable({
+        text: item.text,
+        href: item.href,
+        area: item.area,
+        kind: item.type,
+        inNavigation: item.inNavigation,
+        isControl: item.isControl,
+        tagName: item.tagName,
+        hasClickHandler: item.hasClickHandler,
+      });
+      return Object.assign({}, item, {
+        score: ranking.score,
+        bioLink: ranking.bioLink,
+        actionButton: ranking.actionButton,
+      });
+    });
+    links.sort(function (a, b) { return b.score - a.score; });
+    if (!links.length) return { links: links, picked: null };
+    if (links.length === 1) {
+      return { links: links, picked: Object.assign({}, links[0], { reason: "seul " + links[0].type + " visible" }) };
+    }
+    var main = links.filter(function (link) { return !link.inNavigation; });
+    var chosen = (main.length ? main : links)[0];
+    var reason = main.length
+      ? (chosen.type + " principal")
+      : (chosen.type + " principal (toute la page est en navigation)");
+    return { links: links, picked: Object.assign({}, chosen, { reason: reason }) };
+  }
+
+  var DIRECT_DESTINATION_DOMAINS = [
+    "onlyfans.com",
+    "fansly.com",
+    "mym.fans",
+    "fanvue.com",
+    "patreon.com",
+    "loyalfans.com",
+    "manyvids.com",
+    "fancentro.com",
+    "4based.com",
+    "maloum.com",
+    "passes.com",
+    "unlockd.me",
+    "throne.com",
+    "t.me",
+    "telegram.me",
+    "snapchat.com",
+  ];
+
+  function registrableDomainOfHost(hostname) {
+    var host = normalizeHost(hostname);
+    if (!host) return "";
+    var parts = host.split(".").filter(Boolean);
+    if (parts.length <= 2) return host;
+    var tail2 = parts.slice(-2).join(".");
+    if (/^(co|com|net|org|gov|edu|ac)\.[a-z]{2}$/.test(tail2) && parts.length >= 3) {
+      return parts.slice(-3).join(".");
+    }
+    return tail2;
+  }
+
+  /**
+   * Reconnaît une cible de type smart-link / bouclier en bio (ex. getallink.com/butter)
+   * qui a déjà redirigé automatiquement vers la plateforme finale (ex. onlyfans.com/…/c194)
+   * dès l'ouverture : sans libellé explicite demandé, aucun clic supplémentaire ne doit
+   * être tenté sur la page d'arrivée.
+   */
+  function isDirectDestinationRedirect(initialUrl, finalUrl, linkLabel) {
+    if (String(linkLabel == null ? "" : linkLabel).trim()) return false;
+    var start;
+    var end;
+    try {
+      start = new URL(String(initialUrl || ""));
+      end = new URL(String(finalUrl || ""));
+    } catch (error) {
+      return false;
+    }
+    if (!/^https?:$/i.test(start.protocol) || !/^https?:$/i.test(end.protocol)) return false;
+    var startDomain = registrableDomainOfHost(start.hostname);
+    var endDomain = registrableDomainOfHost(end.hostname);
+    if (!startDomain || !endDomain || startDomain === endDomain) return false;
+    var endHost = normalizeHost(end.hostname);
+    return DIRECT_DESTINATION_DOMAINS.some(function (domain) {
+      return endHost === domain || endHost.slice(-(domain.length + 1)) === "." + domain;
+    });
+  }
+
   function sanitizeSavedProxy(raw) {
     if (!raw || typeof raw !== "object" || typeof raw.id !== "string" || !raw.id) return null;
     var validation = validateProxyEntry(raw);
@@ -966,6 +1170,9 @@
     unwrapRedirectUrl: unwrapRedirectUrl,
     looksLikeBioLinkText: looksLikeBioLinkText,
     scoreClickable: scoreClickable,
+    collectPageClickablesInDom: collectPageClickablesInDom,
+    rankPrimaryClickables: rankPrimaryClickables,
+    isDirectDestinationRedirect: isDirectDestinationRedirect,
     sanitizeSavedProxy: sanitizeSavedProxy,
     sanitizeProxySettings: sanitizeProxySettings,
     normalizeOcrLanguage: normalizeOcrLanguage,

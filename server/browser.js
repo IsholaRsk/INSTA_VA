@@ -306,6 +306,61 @@ export function unwrapRedirectUrl(rawUrl) {
   return candidate;
 }
 
+const DIRECT_DESTINATION_DOMAINS = [
+  'onlyfans.com',
+  'fansly.com',
+  'mym.fans',
+  'fanvue.com',
+  'patreon.com',
+  'loyalfans.com',
+  'manyvids.com',
+  'fancentro.com',
+  '4based.com',
+  'maloum.com',
+  'passes.com',
+  'unlockd.me',
+  'throne.com',
+  't.me',
+  'telegram.me',
+  'snapchat.com',
+];
+
+function registrableDomainOfHost(hostname) {
+  const host = String(hostname || '').trim().toLowerCase().replace(/\.+$/, '');
+  if (!host) return '';
+  const parts = host.split('.').filter(Boolean);
+  if (parts.length <= 2) return host;
+  const tail2 = parts.slice(-2).join('.');
+  if (/^(co|com|net|org|gov|edu|ac)\.[a-z]{2}$/.test(tail2) && parts.length >= 3) {
+    return parts.slice(-3).join('.');
+  }
+  return tail2;
+}
+
+/**
+ * Reconnaît un smart-link / bouclier en bio (ex. getallink.com/butter) qui a déjà
+ * redirigé automatiquement vers la plateforme finale (ex. onlyfans.com/…/c194) dès
+ * l'ouverture, sans étape intermédiaire : lorsque aucun libellé précis n'est exigé,
+ * aucun clic supplémentaire ne doit être tenté sur la page finale.
+ */
+export function isDirectDestinationRedirect(initialUrl, finalUrl, linkLabel = '') {
+  if (String(linkLabel || '').trim()) return false;
+  let start;
+  let end;
+  try {
+    start = new URL(String(initialUrl || ''));
+    end = new URL(String(finalUrl || ''));
+  } catch {
+    return false;
+  }
+  if (!/^https?:$/i.test(start.protocol) || !/^https?:$/i.test(end.protocol)) return false;
+  const startDomain = registrableDomainOfHost(start.hostname);
+  const endDomain = registrableDomainOfHost(end.hostname);
+  if (!startDomain || !endDomain || startDomain === endDomain) return false;
+  const endHost = end.hostname.toLowerCase().replace(/\.+$/, '');
+  return DIRECT_DESTINATION_DOMAINS.some((domain) => endHost === domain || endHost.endsWith(`.${domain}`));
+}
+
 /**
  * Exécute un cycle complet : ouvrir l'URL, attendre la stabilisation, cliquer
  * l'élément demandé (ou l'élément principal), attendre la redirection.
@@ -378,6 +433,24 @@ export async function runCycle({
     }
 
     const expected = normalizeLabel(linkLabel);
+    if (isDirectDestinationRedirect(url, page.url(), expected)) {
+      const finalUrl = page.url();
+      const title = await page.title().catch(() => '');
+      const exitIp = await readExitIp(page);
+      return {
+        initial_url: url,
+        final_url: finalUrl,
+        title: String(title).slice(0, 200),
+        click_label: 'automatique',
+        click_kind: 'redirection directe',
+        click_href: finalUrl,
+        redirected: true,
+        exit_ip: exitIp,
+        proxy_host: proxy?.host || null,
+        completed_at: new Date().toISOString(),
+      };
+    }
+
     const candidates = await collectClickables(page, linkLabel);
     if (!candidates.length) {
       throw new Error(expected

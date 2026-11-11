@@ -54,6 +54,9 @@ const {
   maskUsername,
   pickProxy,
   applyProxyOutcome,
+  collectPageClickablesInDom,
+  rankPrimaryClickables,
+  isDirectDestinationRedirect,
   sanitizeSavedProxy,
   sanitizeProxySettings,
   normalizeOcrLanguage,
@@ -541,7 +544,7 @@ function renderProxyList() {
     topLine.className = "proxy-topline";
     const name = document.createElement("div");
     name.className = "proxy-name";
-    const gwHint = !proxy.name ? proxyGatewayHint(proxy) : "";
+    const gwHint = proxy.name ? proxyGatewayHint(proxy) : "";
     name.textContent = gwHint ? `${proxyLabel(proxy)} · ${gwHint}` : proxyLabel(proxy);
     const badge = document.createElement("span");
     badge.className = "proxy-badge";
@@ -1176,6 +1179,7 @@ async function startRun() {
         proxyPool = {
           mode: proxySettings.mode,
           cursor: proxySettings.cursor,
+          lastProxyId: "",
           autoDisable: proxySettings.autoDisable,
           list: enabledProxies.map((proxy) => ({ ...proxy })),
         };
@@ -1206,12 +1210,12 @@ async function startRun() {
         throw new Error("Les paramètres proxy de Chrome sont contrôlés ailleurs ou indisponibles; aucun onglet ne sera ouvert.");
       }
       addLog(
-        "Proxys Webshare prêts",
+        "Proxys prêts",
         `${proxyPool.list.length} proxy(s) actif(s), rotation ${proxyPool.mode === "random" ? "au hasard" : "dans l’ordre"}. Un proxy différent est appliqué à chaque cycle; ${proxyPool.autoDisable ? `il est désactivé après ${MAX_CONSECUTIVE_FAILURES} échecs consécutifs` : "les échecs ne désactivent rien"}.`,
       );
     } else {
       await chrome.storage.session.remove(PROXY_AUTH_SESSION_KEY);
-      addLog("Proxy Webshare désactivé", "Les cycles utiliseront le réglage proxy actuellement configuré dans Chrome.");
+      addLog("Rotation de proxys désactivée", "Les cycles utiliseront le réglage proxy actuellement configuré dans Chrome.");
     }
     const focusedTabs = await chromeCall(chrome.tabs.query, { active: true, lastFocusedWindow: true });
     const windowId = focusedTabs[0]?.windowId;
@@ -1259,9 +1263,14 @@ async function startRun() {
 
       let proxy = null;
       if (proxyPool) {
-        const picked = pickProxy(proxyPool.list, { mode: proxyPool.mode, cursor: proxyPool.cursor });
+        const picked = pickProxy(proxyPool.list, {
+          mode: proxyPool.mode,
+          cursor: proxyPool.cursor,
+          lastProxyId: proxyPool.lastProxyId,
+        });
         proxyPool.cursor = picked.cursor;
         proxy = picked.proxy;
+        if (proxy) proxyPool.lastProxyId = proxy.id;
         if (!proxy) {
           addLog("Aucun proxy disponible", "Tous les proxys de la liste sont désactivés; le cycle utilise le réglage proxy de Chrome.", true);
         }
@@ -1596,7 +1605,7 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
   const monitoredTabIds = new Set();
   let proxyActive = false;
   let proxyRecovery = null;
-  let clicked = false;
+  let pageLoaded = false;
   let failure = null;
   let proxyApplied = false;
   let proxyActivationAttempted = false;
@@ -1656,6 +1665,11 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
 
     let finalTab = await waitForStableUrl(tab.id);
     currentUrlNode.textContent = finalTab.url || url;
+    const netError = await readChromeNetworkError(tab.id, finalTab.url);
+    if (netError) {
+      throw new Error(`Échec réseau lors du chargement de la page (${netError}).`);
+    }
+    pageLoaded = true;
     const redirectText = redirectCount ? `${redirectCount} redirection(s)` : "aucune redirection détectée";
     addLog(`${target.pseudo} · arrivée sur l’URL`, `${url}\n→ ${finalTab.url || url}\n${redirectText}${finalTab.title ? ` · ${finalTab.title}` : ""}`);
 
@@ -1694,6 +1708,18 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
       }
     }
 
+    // Lien intelligent / bouclier en bio (ex. getallink.com/butter → onlyfans.com/…/c194) :
+    // si l'ouverture a déjà redirigé vers la plateforme finale et qu'aucun libellé précis
+    // n'est exigé, la destination est déjà atteinte sans risquer de cliquer un lien annexe.
+    if (isDirectDestinationRedirect(url, finalTab.url || "", label)) {
+      addLog(
+        `${target.pseudo} · redirection directe`,
+        `La cible a déjà redirigé automatiquement vers la destination finale :\n→ ${finalTab.url}\nAucun clic supplémentaire nécessaire sur la page d’arrivée.`,
+      );
+      if (!stopRequested) addLog(`${target.pseudo} · cycle terminé`, "Visite et redirection directe effectuées.");
+      return { status: "success", proxyActive };
+    }
+
     let match;
     if (label) {
       const matches = await findExactClickables(activePageTabId, label);
@@ -1720,19 +1746,21 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
         + (primary.picked.bioLink ? "\nLien en bio reconnu : il passe devant les boutons d’action du profil." : ""),
       );
     }
-    const ocrPhrase = findOcrPhrase(ocrResult.words, label);
-    if (ocrPhrase) {
-      // La capture est prise dans le même viewport émulé : même échelle que les coordonnées DOM.
-      const scaleX = ocrResult.width ? ocrResult.width / VIEWPORT.width : 1;
-      const scaleY = ocrResult.height ? ocrResult.height / VIEWPORT.height : 1;
-      const distance = Math.hypot(ocrPhrase.x / scaleX - match.x, ocrPhrase.y / scaleY - match.y);
-      addLog(
-        `${target.pseudo} · OCR concordant`,
-        `« ${label} » retrouvé dans la capture (confiance ${Math.round(ocrPhrase.confidence)} %), à ${Math.round(distance)} px du lien DOM.`,
-        distance > 160,
-      );
-    } else if (ocrResult.words.length) {
-      addLog(`${target.pseudo} · OCR sans correspondance`, `Le libellé « ${label} » n’a pas été relu dans la capture; la détection DOM exacte est conservée.`);
+    if (label) {
+      const ocrPhrase = findOcrPhrase(ocrResult.words, label);
+      if (ocrPhrase) {
+        // La capture est prise dans le même viewport émulé : même échelle que les coordonnées DOM.
+        const scaleX = ocrResult.width ? ocrResult.width / VIEWPORT.width : 1;
+        const scaleY = ocrResult.height ? ocrResult.height / VIEWPORT.height : 1;
+        const distance = Math.hypot(ocrPhrase.x / scaleX - match.x, ocrPhrase.y / scaleY - match.y);
+        addLog(
+          `${target.pseudo} · OCR concordant`,
+          `« ${label} » retrouvé dans la capture (confiance ${Math.round(ocrPhrase.confidence)} %), à ${Math.round(distance)} px du lien DOM.`,
+          distance > 160,
+        );
+      } else if (ocrResult.words.length) {
+        addLog(`${target.pseudo} · OCR sans correspondance`, `Le libellé « ${label} » n’a pas été relu dans la capture; la détection DOM exacte est conservée.`);
+      }
     }
     const kind = match.type || "lien";
     const description = label
@@ -1752,7 +1780,6 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
       monitoredTabIds.add(childTab.id);
     });
     await clickAt(activePageTabId, match.x, match.y);
-    clicked = true;
     const openedTab = await openedTabPromise;
     addLog(`${target.pseudo} · ${kind} cliqué`, `« ${label || match.text || ""} »${match.href ? ` → ${match.href}` : ""}`);
     if (openedTab) {
@@ -1812,12 +1839,12 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
     activeTabId = null;
     currentUrlNode.textContent = "Onglet fermé";
     if (failure && useProxy) {
-      // Attribution : une activation impossible ou un échec avant le clic (page non
-      // chargée, tunnel refusé) est imputé au proxy. Après le clic, l'échec n'est
-      // imputé au proxy que si le message trahit un problème réseau/proxy.
+      // Attribution : une activation impossible ou un échec pendant le chargement initial
+      // (page non chargée, tunnel refusé, page d'erreur Chrome) est imputé au proxy. Une fois
+      // la page HTTP réellement chargée, seules les erreurs réseau/proxy explicites pénalisent le proxy.
       const blameProxy = !proxyApplied
         ? proxyActivationAttempted
-        : (!clicked || errorLooksLikeProxyFailure(failure));
+        : (!pageLoaded || errorLooksLikeProxyFailure(failure));
       failure.proxyActive = blameProxy;
       if (blameProxy) failure.proxyError = String(failure.message || "Échec du cycle.").slice(0, 200);
     }
@@ -1936,55 +1963,30 @@ async function readPageGate(tabId) {
 /** Sélecteur commun : liens + boutons/boutons-liens réellement cliquables. */
 const CLICKABLE_SELECTOR = 'a[href], [role="link"], button, input[type="button"], input[type="submit"], [role="button"], summary';
 
-function clickableHelpersSource() {
-  return `
-    const normalize = (value) => String(value || "")
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .toLocaleLowerCase("fr")
-      .replace(/\s+/g, " ")
-      .trim();
-    const labelOf = (element) => {
-      if (element instanceof HTMLInputElement) return element.value || element.getAttribute("aria-label") || "";
-      const visibleText = String(element.innerText || "").replace(/\s+/g, " ").trim();
-      return visibleText || element.getAttribute("aria-label") || element.getAttribute("title") || "";
-    };
-    const isVisible = (element) => {
-      const rect = element.getBoundingClientRect();
-      const style = window.getComputedStyle(element);
-      if (!rect.width || !rect.height || rect.bottom <= 0 || rect.right <= 0 ||
-          rect.top >= window.innerHeight || rect.left >= window.innerWidth) return false;
-      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
-      if (style.pointerEvents === "none" || element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true") return false;
-      return true;
-    };
-    const kindOf = (element) => {
-      if (element.tagName === "A" || element.getAttribute("role") === "link") return "lien";
-      if (element.tagName === "SUMMARY") return "résumé";
-      return "bouton";
-    };
-    const describe = (element) => {
-      const rect = element.getBoundingClientRect();
-      const left = Math.max(0, rect.left);
-      const right = Math.min(window.innerWidth, rect.right);
-      const top = Math.max(0, rect.top);
-      const bottom = Math.min(window.innerHeight, rect.bottom);
-      const rawHref = element instanceof HTMLAnchorElement ? (element.href || "") : "";
-      return {
-        index: Number(element.dataset.instavaIndex),
-        x: (left + right) / 2,
-        y: (top + bottom) / 2,
-        href: rawHref,
-        text: labelOf(element).slice(0, 160),
-        type: kindOf(element),
-        area: (right - left) * (bottom - top),
-        tagName: element.tagName,
-        hasClickHandler: typeof element.onclick === "function" ||
-          element.hasAttribute("onclick") || element.getAttribute("tabindex") !== null,
-        isControl: element.tagName === "BUTTON" || element.getAttribute("role") === "button" ||
-          (element.tagName === "INPUT" && /^(button|submit)$/i.test(element.type)),
-      };
-    };`;
+/**
+ * Détecte une page d'erreur réseau interne de Chrome (`chrome-error://` ou `#main-frame-error`)
+ * afin de remonter immédiatement le code `ERR_...` (ex. tunnel proxy refusé) au lieu de
+ * considérer la page comme chargée.
+ */
+async function readChromeNetworkError(tabId, tabUrl) {
+  const isErrorScheme = /^chrome-error:/i.test(String(tabUrl || ""));
+  try {
+    const result = await sendCDP(tabId, "Runtime.evaluate", {
+      expression: `(() => {
+        const isErrorDoc = location.protocol === "chrome-error:" || Boolean(document.getElementById("main-frame-error"));
+        if (!isErrorDoc) return "";
+        const text = String(document.body ? document.body.innerText : "");
+        const match = text.match(/ERR_[A-Z0-9_]+/);
+        return match ? match[0] : "ERR_CONNECTION_FAILED";
+      })()`,
+      returnByValue: true,
+    });
+    const code = String(result.result?.value || "");
+    if (code) return code;
+  } catch {
+    // Si la page d'erreur Chrome refuse l'évaluation CDP, l'URL chrome-error:// suffit.
+  }
+  return isErrorScheme ? "ERR_CONNECTION_FAILED" : "";
 }
 
 /**
@@ -1993,15 +1995,10 @@ function clickableHelpersSource() {
  */
 async function findExactClickables(tabId, label) {
   const normalizedLabel = normalizeLinkLabelKey(label);
-  const expression = `(() => {
-    const target = ${JSON.stringify(normalizedLabel)};
-    ${clickableHelpersSource()}
-    const elements = Array.from(document.querySelectorAll(${JSON.stringify(CLICKABLE_SELECTOR)}));
-    elements.forEach((element, index) => { element.dataset.instavaIndex = String(index); });
-    return elements
-      .filter((element) => isVisible(element) && normalize(labelOf(element)) === target)
-      .map((element) => describe(element));
-  })()`;
+  const expression = `(${collectPageClickablesInDom.toString()})(${JSON.stringify({
+    selector: CLICKABLE_SELECTOR,
+    exactLabel: normalizedLabel,
+  })})`;
   const result = await sendCDP(tabId, "Runtime.evaluate", {
     expression,
     returnByValue: true,
@@ -2013,69 +2010,22 @@ async function findExactClickables(tabId, label) {
 }
 
 /**
- * Libellé vide : le bot clique tout seul le contrôle principal de la page
- * (lien ou bouton), en privilégiant la surface et le texte hors navigation.
+ * Libellé vide : collecte les éléments visibles dans la page inspectée (sans aucune
+ * dépendance externe), puis les classe côté extension via `rankPrimaryClickables`.
  */
 async function findPrimaryLink(tabId) {
-  const expression = `(() => {
-    const NAV = 'header, nav, footer, aside, [role="navigation"], [role="banner"], [role="contentinfo"]';
-    ${clickableHelpersSource()}
-    const elements = Array.from(document.querySelectorAll(${JSON.stringify(CLICKABLE_SELECTOR)}));
-    elements.forEach((element, index) => { element.dataset.instavaIndex = String(index); });
-    const visible = [];
-    for (const element of elements) {
-      if (!isVisible(element)) continue;
-      if (element instanceof HTMLAnchorElement) {
-        const rawHref = element.href || "";
-        if (!rawHref) continue;
-        const current = location.href.split('#')[0];
-        if (rawHref.split('#')[0] === current && (rawHref.includes('#') || rawHref === '#')) continue;
-        if (/^(javascript:|mailto:|tel:)/i.test(element.getAttribute('href') || '')) continue;
-      }
-      const description = describe(element);
-      const inNavigation = Boolean(element.closest(NAV));
-      const isControl = element.tagName === 'BUTTON' || element.getAttribute('role') === 'button' ||
-        (element.tagName === 'INPUT' && /^(button|submit)$/i.test(element.type));
-      // Le classement est délégué à bot-utils : la surface et la longueur du
-      // texte ne décident plus à la place du sens (lien de bio prioritaire,
-      // boutons d'action rétrogradés).
-      const ranking = InstaVAUtils.scoreClickable({
-        text: description.text,
-        href: description.href,
-        area: description.area,
-        kind: description.type,
-        inNavigation,
-        isControl,
-        tagName: description.tagName,
-        hasClickHandler: description.hasClickHandler,
-      });
-      visible.push({
-        ...description,
-        inNavigation,
-        isControl,
-        score: ranking.score,
-        bioLink: ranking.bioLink,
-        actionButton: ranking.actionButton,
-      });
-    }
-    visible.sort((a, b) => b.score - a.score);
-    return visible;
-  })()`;
+  const expression = `(${collectPageClickablesInDom.toString()})(${JSON.stringify({
+    selector: CLICKABLE_SELECTOR,
+    primaryOnly: true,
+  })})`;
   const result = await sendCDP(tabId, "Runtime.evaluate", {
     expression,
     returnByValue: true,
     awaitPromise: true,
   });
   if (result.exceptionDetails) throw new Error("Impossible de repérer les éléments cliquables de la page.");
-  const links = Array.isArray(result.result?.value) ? result.result.value : [];
-  if (!links.length) return { links, picked: null };
-  if (links.length === 1) return { links, picked: { ...links[0], reason: `seul ${links[0].type} visible` } };
-  const main = links.filter((link) => !link.inNavigation);
-  const picked = (main.length ? main : links)[0];
-  return {
-    links,
-    picked: { ...picked, reason: main.length ? `${picked.type} principal` : `${picked.type} principal (toute la page est en navigation)` },
-  };
+  const rawCandidates = Array.isArray(result.result?.value) ? result.result.value : [];
+  return rankPrimaryClickables(rawCandidates);
 }
 
 /** Clé de comparaison des libellés dans la page (casse, accents, espaces normalisés). */
