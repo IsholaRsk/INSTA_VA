@@ -403,6 +403,19 @@ export function createStore(db) {
       return Number(stmt('DELETE FROM proxies WHERE user_id = ? AND enabled = 0').run(userId).changes || 0);
     },
 
+    /**
+     * Vide la liste. La liste de proxys est un import unique et remplaçable :
+     * coller une nouvelle liste doit pouvoir repartir de zéro en une action,
+     * sans effacer un par un des dizaines de proxys.
+     */
+    deleteAllProxies(userId) {
+      const info = stmt('DELETE FROM proxies WHERE user_id = ?').run(userId);
+      // Le curseur de rotation pointerait dans le vide : on le remet à zéro,
+      // en conservant les préférences (rotation, seuil de désactivation).
+      stmt('UPDATE proxy_state SET cursor = 0, last_proxy_id = NULL WHERE user_id = ?').run(userId);
+      return Number(info.changes || 0);
+    },
+
     getProxyState(userId) {
       const row = stmt('SELECT * FROM proxy_state WHERE user_id = ?').get(userId);
       if (row) {

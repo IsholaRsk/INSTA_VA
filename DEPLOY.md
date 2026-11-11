@@ -414,6 +414,31 @@ Deux conséquences concrètes :
 
 **Le bouton Tester te donne désormais ce verdict.** Après un test, chaque proxy affiche la nature de son IP de sortie : `Datacenter · OVH (AS16276)`, `Résidentiel · Free SAS`, ou `Nature d’IP inconnue`. Le compte rendu global indique combien de tes proxys sortent par un hébergeur — s'ils le font tous, la question n'est plus « combien de proxys » mais « quel type de proxys ».
 
+### Liste de proxys : import unique et vidage en une action
+
+Une liste de proxys se remplace, elle ne s'édite pas. Coller la liste Rayobyte suffit :
+
+```
+uti1lisateurfictif:motdepassefictif-country-US@us-east.gw.rayobyte.com:8000
+uti1lisateurfictif:motdepassefictif-country-US@us-east.gw.rayobyte.com:8001
+```
+
+Le format `user:pass@host:port` est reconnu tel quel, y compris quand le mot de passe contient des tirets et un suffixe de pays. Un `/` ou des paramètres collés par erreur (copie depuis un mail) sont retirés.
+
+Le bouton **Vider la liste** supprime tous les proxys en une requête (`DELETE /api/proxies?id=all`), en conservant les préférences de rotation et en remettant le curseur à zéro. Il n'y a plus besoin de décocher puis supprimer les proxys un par un.
+
+### Clic sur le lien en bio Instagram
+
+Un lien en bio Instagram n'est pas une balise `<a>` : c'est un élément cliquable dont le texte est l'URL affichée, souvent tronquée en un simple mot (`shop`, `maboutique`). Le clic passe par un redirecteur interne, `l.instagram.com/?u=…`, qui masque la destination réelle.
+
+Trois corrections :
+
+1. **Le lien en bio est reconnu** et reçoit un bonus de score décisif, même quand son texte est court.
+2. **Les boutons d'action sont rétrogradés** (`S'abonner`, `Message`, `Suivre`, `Partager`…). Avant, leur surface les faisait gagner : avec un libellé de bio court, le bot cliquait sur « S'abonner ».
+3. **Le redirecteur est décodé** : après le clic, l'URL `l.instagram.com/?u=<destination>` est dépliée et la destination réelle est visitée dans le même contexte, donc avec le même proxy et les mêmes cookies.
+
+La formule de score garde son autre exigence : sans libellé, un gros bouton d'appel à l'action passe toujours devant un petit lien annexe.
+
 ### Thème et robustesse
 
 L'interface utilise un thème sombre « cyberpunk doux » : base bleu-nuit (`#080a12`), halos cyan et magenta très diffus, grille à peine visible, un seul liseré lumineux en haut des cartes. Aucun néon saturé. Tous les contrastes texte/fond dépassent le seuil WCAG AA (4,5:1), y compris les badges de statut. Le manifeste PWA et la couleur de barre du navigateur suivent la même base.

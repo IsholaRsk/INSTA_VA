@@ -612,6 +612,8 @@ function renderProxies() {
   $('#proxy-enabled').checked = Boolean(proxyState?.enabled);
   $('#proxy-rotation').value = proxyState?.rotation === 'random' ? 'random' : 'order';
   $('#remove-proxy').classList.toggle('hidden', !proxyRecords.some((proxy) => !proxy.enabled));
+  // « Vider la liste » n'a de sens que s'il y a une liste.
+  $('#clear-proxies').classList.toggle('hidden', !proxyRecords.length);
 
   proxyList.replaceChildren();
   if (!proxyRecords.length) {
@@ -877,6 +879,28 @@ async function saveProxyState() {
   }
 }
 
+/**
+ * Vide la liste entière. La liste de proxys est un import unique : la
+ * remplacer doit coûter un clic, pas soixante-neuf suppressions.
+ */
+async function clearProxies() {
+  const count = proxyRecords.length;
+  if (!count) return;
+  const confirmed = window.confirm(
+    `Supprimer définitivement les ${count} proxys de la liste ?\n\n`
+    + 'Tu pourras coller une nouvelle liste juste après. Les préférences de rotation sont conservées.',
+  );
+  if (!confirmed) return;
+  const button = $('#clear-proxies');
+  button.disabled = true;
+  try {
+    const data = await apiRequest('/api/proxies?id=all', { method: 'DELETE' });
+    setFormMessage($('#proxy-message'), data.message || 'Liste vidée.', 'success');
+    await loadProxyStatus();
+  } catch (error) { setFormMessage($('#proxy-message'), displayError(error), 'error'); }
+  finally { button.disabled = false; }
+}
+
 async function removeProxy() {
   if (!window.confirm('Supprimer définitivement les proxys désactivés ?')) return;
   const button = $('#remove-proxy');
@@ -1005,6 +1029,7 @@ async function boot() {
   startButton.addEventListener('click', startRun);
   $('#proxy-form').addEventListener('submit', saveProxy);
   $('#remove-proxy').addEventListener('click', removeProxy);
+  $('#clear-proxies').addEventListener('click', clearProxies);
   $('#test-proxies').addEventListener('click', () => testProxies(null, $('#test-proxies')));
   $('#clear-sessions').addEventListener('click', clearSessions);
   $('#proxy-enabled').addEventListener('change', saveProxyState);
