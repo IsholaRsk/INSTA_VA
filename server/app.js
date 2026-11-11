@@ -404,6 +404,12 @@ export function createApp({
       sendJson(res, 200, { removed, message: `${removed} proxy(s) désactivé(s) supprimé(s).` });
       return;
     }
+    // Liste entière : c'est le cas courant, une liste de proxys se remplace.
+    if (id === 'all') {
+      const removed = store.deleteAllProxies(user.id);
+      sendJson(res, 200, { removed, message: `${removed} proxy(s) supprimé(s). La liste est vide.` });
+      return;
+    }
     if (!id) throw new HttpError(400, 'Identifiant de proxy manquant.');
     if (!store.deleteProxy(user.id, id)) throw new HttpError(404, 'Proxy introuvable.');
     sendJson(res, 200, { ok: true });

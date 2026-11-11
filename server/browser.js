@@ -150,6 +150,36 @@ export function clickableCollectorSource() {
       'header, nav, footer, aside, [role="navigation"], [role="banner"], [role="contentinfo"]',
     ));
 
+    // Boutons que l'on clique par erreur si l'on se fie à la surface : ils sont
+    // gros, au centre, et n'ont rien à voir avec un lien de destination.
+    const ACTION_LABELS = /^(s'abonner|se désabonner|abonnement|suivre|ne plus suivre|se connecter|connexion|s'inscrire|créer un compte|message|envoyer|partager|enregistrer|j'aime|aimer|commenter|plus|options|fermer|annuler|retour)$/;
+
+    // Un lien en bio Instagram n'est pas une balise <a> : c'est un élément
+    // cliquable dont le texte est l'URL affichée (lien.bio/xxx), et dont le clic
+    // ouvre instagram.com/l.php?u=<destination réelle>. Le reconnaître évite de
+    // cliquer à côté et de « réussir » un cycle sans jamais visiter la cible.
+    const isBioLink = (element, text) => {
+      if (element.closest('header, nav, [role="navigation"], [role="banner"]')) return false;
+      const raw = String(text || '').trim();
+      if (!raw) return false;
+      // Le texte affiché peut être l'URL complète (lien.bio/xxx, linktr.ee/…)
+      // mais aussi un simple libellé de la forme « shop », « maboutique » ou
+      // « boutique.fr » : Instagram tronque souvent le domaine. On retient donc
+      // tout texte court et sans espaces comme candidat, puis la position et la
+      // présence d'un gestionnaire de clic font le tri.
+      const looksLikeUrl = /^(?:[a-z0-9-]+\.)+[a-z]{2,24}(?:\/\S*)?$/i.test(raw)
+        || /^[a-z0-9][a-z0-9._-]{1,40}\/\S*$/i.test(raw)
+        || /^l\.instagram\.com\/l\.php\?u=/i.test(raw)
+        || (/^[a-z0-9][a-z0-9._-]*$/i.test(raw) && raw.length <= 32);
+      if (!looksLikeUrl) return false;
+      // Le texte seul ne suffit pas : il doit être actionnable.
+      return element.tagName === 'A' || element.tagName === 'BUTTON'
+        || element.getAttribute('role') === 'link' || element.getAttribute('role') === 'button'
+        || typeof element.onclick === 'function'
+        || element.getAttribute('tabindex') !== null
+        || Boolean(element.querySelector('a[href]'));
+    };
+
     const describe = (element, index) => {
       const rect = element.getBoundingClientRect();
       const left = Math.max(0, rect.left);
@@ -159,12 +189,35 @@ export function clickableCollectorSource() {
       const area = Math.max(0, right - left) * Math.max(0, bottom - top);
       const text = labelOf(element).trim();
       const href = element.tagName === 'A' ? (element.href || '') : '';
+      const bio = isBioLink(element, text);
+      const action = ACTION_LABELS.test(normalize(text));
+      // Pondération revue : la surface et la longueur du texte ne doivent pas
+      // décider à la place du sens. Un lien de bio passe devant ; un bouton
+      // d'action est fortement rétrogradé, même s'il est gros et centré.
+      let score = 0;
+      score += bio ? 9000 : 0;
+      score += inNavigation(element) ? 0 : 1800;
+      // Un vrai lien porte une destination : c'est ce qu'on cherche quand
+      // aucun libellé n'est fourni. Cette prime reste sous celle de la surface,
+      // pour qu'un gros bouton d'appel à l'action garde la priorité.
+      score += href ? 160 : 0;
+      score -= action ? 7000 : 0;
+      // Longueur : un petit bonus seulement, plafonné (un texte long n'est pas
+      // plus cliquable qu'un texte court).
+      score += Math.min(text.length, 40) * 10;
+      // La surface départage deux éléments de même nature — un gros bouton
+      // d'appel à l'action plutôt qu'un petit lien annexe — mais elle ne peut
+      // jamais battre un lien en bio, qui a un bonus propre.
+      score += Math.min(area / 200, 900);
+      if (kindOf(element) === 'bouton' && !bio) score += 200;
       return {
         index,
         label: text.slice(0, 120),
         kind: kindOf(element),
         href: String(href || '').slice(0, 2048),
-        score: area + text.length * 60 + (inNavigation(element) ? 0 : 4000) + (kindOf(element) === 'bouton' ? 1200 : 0),
+        bio_link: bio,
+        action_button: action,
+        score: Math.round(score),
       };
     };
 
@@ -221,6 +274,36 @@ export async function closeContext(context, { onStorageState = null } = {}) {
     try { onStorageState(saved); } catch { /* jamais bloquant */ }
   }
   return saved;
+}
+
+/**
+ * Instagram (et quelques autres) ne redirige pas directement vers la cible :
+ * le lien en bio passe par un redirecteur interne, `l.instagram.com/l.php?u=…`.
+ * Sans ce décodage, la visite se termine sur une page d'avertissement et le
+ * lien de la bio n'est jamais réellement visité.
+ *
+ * Fonction pure, testable sans navigateur.
+ */
+export function unwrapRedirectUrl(rawUrl) {
+  let candidate = String(rawUrl || '').trim();
+  if (!candidate) return '';
+  for (let hop = 0; hop < 3; hop += 1) {
+    let parsed;
+    try { parsed = new URL(candidate); } catch { return candidate; }
+    const host = parsed.hostname.toLowerCase();
+    // Deux formes existent : l.instagram.com/?u=… (la plus courante depuis le
+    // mobile) et instagram.com/l.php?u=… (desktop ancien).
+    const isInstagramShim = /(^|\.)instagram\.com$/.test(host)
+      && (host.startsWith('l.') || /^\/l\.php$/.test(parsed.pathname));
+    const isFacebookShim = /(^|\.)facebook\.com$/.test(host) && /^\/l\.php$/.test(parsed.pathname);
+    const wrapped = parsed.searchParams.get('u') || parsed.searchParams.get('url') || '';
+    if (!(isInstagramShim || isFacebookShim) || !wrapped) return candidate;
+    let decoded = wrapped;
+    try { decoded = decodeURIComponent(wrapped); } catch { /* déjà décodé */ }
+    if (!decoded || decoded === candidate) return candidate;
+    candidate = decoded;
+  }
+  return candidate;
 }
 
 /**
@@ -321,7 +404,16 @@ export async function runCycle({
     const popup = await popupPromise;
     const destination = popup || page;
     await waitForRedirect(destination, popup ? 'about:blank' : beforeUrl);
-    const finalUrl = destination.url();
+    let finalUrl = destination.url();
+    // Lien en bio Instagram : on suit la destination réelle dans le même
+    // contexte, donc avec le même proxy et les mêmes cookies.
+    const unwrapped = unwrapRedirectUrl(finalUrl);
+    if (unwrapped && unwrapped !== finalUrl && /^https?:/i.test(unwrapped)) {
+      await assertPublicRequestUrl(unwrapped);
+      await destination.goto(unwrapped, { waitUntil: 'domcontentloaded', timeout: navigationTimeout }).catch(() => null);
+      await waitForStable(destination, navigationTimeout);
+      finalUrl = destination.url();
+    }
     const title = await destination.title().catch(() => '');
     // Preuve d'usage du proxy : l'IP vue par un service externe. Null si le
     // service est injoignable — jamais bloquant.
