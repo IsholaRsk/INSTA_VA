@@ -45,6 +45,8 @@ const {
   describeTargetPlan,
   validateProxyEntry,
   proxySignature,
+  proxyGatewayHint,
+  parseProxyLine,
   parseProxyLines,
   proxyEndpoint,
   proxyLabel,
@@ -81,6 +83,7 @@ const autoDisableProxyInput = $("autoDisableProxy");
 const proxyListNode = $("proxyList");
 const emptyProxiesNode = $("emptyProxies");
 const proxySummaryNode = $("proxySummary");
+const clearProxiesButton = $("clearProxies");
 const proxyForm = $("proxyForm");
 const proxyFormTitle = $("proxyFormTitle");
 const proxyHostInput = $("proxyHost");
@@ -90,11 +93,13 @@ const proxyUsernameInput = $("proxyUsername");
 const proxyPasswordInput = $("proxyPassword");
 const saveProxyButton = $("saveProxy");
 const cancelProxyEditButton = $("cancelProxyEdit");
+const proxyFormFeedbackNode = $("proxyFormFeedback");
 const proxyImportForm = $("proxyImportForm");
 const proxyImportLinesInput = $("proxyImportLines");
 const proxyDefaultUsernameInput = $("proxyDefaultUsername");
 const proxyDefaultPasswordInput = $("proxyDefaultPassword");
 const importProxiesButton = $("importProxies");
+const proxyImportFeedbackNode = $("proxyImportFeedback");
 const formTitle = $("formTitle");
 const saveTargetButton = $("saveTarget");
 const cancelEditButton = $("cancelEdit");
@@ -151,7 +156,9 @@ let loadedLanguage = "";
 
 $("clearLog").addEventListener("click", () => logNode.replaceChildren());
 proxyForm.addEventListener("submit", saveProxyFromForm);
+proxyHostInput.addEventListener("paste", handleProxyHostPaste);
 proxyImportForm.addEventListener("submit", importProxiesFromText);
+clearProxiesButton.addEventListener("click", clearAllProxies);
 cancelProxyEditButton.addEventListener("click", clearProxyForm);
 useRotatingProxyInput.addEventListener("change", saveProxySettingsFromForm);
 proxyRotationModeInput.addEventListener("change", saveProxySettingsFromForm);
@@ -492,10 +499,24 @@ function renderProxySettings() {
   autoDisableProxyInput.checked = proxySettings.autoDisable;
 }
 
+function setProxyFeedback(element, message, tone = "ok") {
+  if (!element) return;
+  if (!message) {
+    element.textContent = "";
+    element.hidden = true;
+    element.className = "import-feedback";
+    return;
+  }
+  element.textContent = message;
+  element.className = `import-feedback ${tone}`;
+  element.hidden = false;
+}
+
 function renderProxyList() {
   proxyListNode.replaceChildren();
-  const enabledCount = savedProxies.filter((proxy) => proxy.enabled).length;
   emptyProxiesNode.hidden = savedProxies.length > 0;
+  clearProxiesButton.hidden = savedProxies.length === 0;
+  clearProxiesButton.disabled = running;
   proxySummaryNode.textContent = proxySummaryText();
 
   for (const proxy of savedProxies) {
@@ -520,7 +541,8 @@ function renderProxyList() {
     topLine.className = "proxy-topline";
     const name = document.createElement("div");
     name.className = "proxy-name";
-    name.textContent = proxyLabel(proxy);
+    const gwHint = !proxy.name ? proxyGatewayHint(proxy) : "";
+    name.textContent = gwHint ? `${proxyLabel(proxy)} · ${gwHint}` : proxyLabel(proxy);
     const badge = document.createElement("span");
     badge.className = "proxy-badge";
     if (!proxy.enabled) {
@@ -606,7 +628,61 @@ function clearProxyForm() {
   proxyFormTitle.textContent = "Ajouter un proxy";
   saveProxyButton.textContent = "Ajouter à la liste";
   cancelProxyEditButton.hidden = true;
+  setProxyFeedback(proxyFormFeedbackNode, "");
   renderProxyList();
+}
+
+function handleProxyHostPaste(event) {
+  if (running) return;
+  const pasted = String(event.clipboardData?.getData("text") || "").trim();
+  if (!pasted) return;
+
+  // Si l'utilisateur colle plusieurs lignes (ou des proxys séparés par , ou ;) dans « Hôte »,
+  // on redirige automatiquement vers la zone « Import en masse » au lieu de tronquer les retours à la ligne.
+  if (/[\r\n]/.test(pasted) || (pasted.indexOf(":") > 0 && /[,;]/.test(pasted) && parseProxyLines(pasted).entries.length > 1)) {
+    event.preventDefault();
+    proxyImportLinesInput.value = proxyImportLinesInput.value.trim()
+      ? `${proxyImportLinesInput.value.trim()}\n${pasted}`
+      : pasted;
+    setProxyFeedback(proxyFormFeedbackNode, "");
+    setProxyFeedback(proxyImportFeedbackNode, "Liste collée dans « Import en masse » : clique sur « Importer la liste ».", "warn");
+    if (typeof proxyImportForm.scrollIntoView === "function") {
+      proxyImportForm.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+    proxyImportLinesInput.focus();
+    return;
+  }
+
+  // Si une ligne complète (user:pass@host:port ou host:port:user:pass) est collée dans « Hôte »,
+  // on remplit automatiquement tous les champs du formulaire.
+  if (pasted.indexOf(":") > 0) {
+    const parsed = parseProxyLine(pasted, { defaultScheme: proxySchemeInput.value || "http" });
+    if (parsed.ok) {
+      event.preventDefault();
+      proxySchemeInput.value = parsed.value.scheme;
+      proxyHostInput.value = parsed.value.host;
+      proxyPortInput.value = String(parsed.value.port);
+      proxyUsernameInput.value = parsed.value.username;
+      proxyPasswordInput.value = parsed.value.password;
+      setProxyFeedback(proxyFormFeedbackNode, "Ligne reconnue : clique sur « Ajouter à la liste ».", "ok");
+    }
+  }
+}
+
+async function clearAllProxies() {
+  if (running || !savedProxies.length) return;
+  if (!window.confirm(`Supprimer les ${savedProxies.length} proxy(s) de la liste ?`)) return;
+  try {
+    await persistProxies([]);
+    savedProxies = [];
+    if (editingProxyId) clearProxyForm();
+    renderProxyList();
+    setProxyFeedback(proxyImportFeedbackNode, "Liste vidée. Tu peux coller une nouvelle liste ci-dessus.", "ok");
+    setStatus("Liste des proxys vidée.");
+  } catch (error) {
+    setProxyFeedback(proxyImportFeedbackNode, `Suppression impossible : ${error.message}`, "error");
+    addLog("Vidage des proxys échoué", error.message, true);
+  }
 }
 
 async function saveProxyFromForm(event) {
@@ -616,6 +692,7 @@ async function saveProxyFromForm(event) {
   try {
     value = readProxyForm();
   } catch (error) {
+    setProxyFeedback(proxyFormFeedbackNode, error.message, "error");
     setStatus(error.message);
     return;
   }
@@ -623,7 +700,9 @@ async function saveProxyFromForm(event) {
   const signature = proxySignature(value);
   const duplicate = savedProxies.find((proxy) => proxySignature(proxy) === signature && proxy.id !== editingProxyId);
   if (duplicate) {
-    setStatus(`Ce proxy existe déjà dans la liste (${proxyLabel(duplicate)}).`);
+    const message = `Ce proxy existe déjà dans la liste (${proxyLabel(duplicate)}).`;
+    setProxyFeedback(proxyFormFeedbackNode, message, "warn");
+    setStatus(message);
     return;
   }
 
@@ -637,13 +716,19 @@ async function saveProxyFromForm(event) {
   try {
     await persistProxies(nextProxies);
   } catch (error) {
+    setProxyFeedback(proxyFormFeedbackNode, `Enregistrement échoué : ${error.message}`, "error");
     addLog("Enregistrement du proxy échoué", error.message, true);
     return;
   }
   savedProxies = nextProxies;
   clearProxyForm();
   renderProxyList();
+  const doneMessage = isEditing ? "Proxy mis à jour." : "✓ Proxy ajouté à la liste ci-dessus.";
+  setProxyFeedback(proxyFormFeedbackNode, doneMessage, "ok");
   setStatus(isEditing ? "Proxy mis à jour." : "Proxy ajouté à la liste.");
+  if (typeof proxyListNode.scrollIntoView === "function") {
+    proxyListNode.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
 }
 
 async function importProxiesFromText(event) {
@@ -651,22 +736,25 @@ async function importProxiesFromText(event) {
   if (running) return;
   const defaultUsername = proxyDefaultUsernameInput.value;
   const defaultPassword = proxyDefaultPasswordInput.value;
-  const { entries, errors } = parseProxyLines(proxyImportLinesInput.value, {
+  const { entries, errors, duplicates: internalDuplicates } = parseProxyLines(proxyImportLinesInput.value, {
     defaultScheme: proxySchemeInput.value || "http",
     defaultUsername,
     defaultPassword,
   });
 
   if (!entries.length) {
-    setStatus(errors.length
-      ? `Aucun proxy importé. ${errors.length} ligne(s) refusée(s) — ${errors[0].message}`
-      : "Colle au moins une ligne de proxy avant d’importer.");
+    const errorMessage = errors.length
+      ? `Aucun proxy importé (${errors.length} ligne(s) refusée(s)) — Ligne ${errors[0].line} : ${errors[0].message}`
+      : "Colle au moins une ligne de proxy avant d’importer.";
+    setProxyFeedback(proxyImportFeedbackNode, errorMessage, "error");
+    setStatus(errorMessage);
+    if (errors.length) addLog("Lignes ignorées", errors.map((error) => `Ligne ${error.line} : ${error.message}`).join("\n"), true);
     return;
   }
 
   const known = new Set(savedProxies.map(proxySignature));
   const additions = [];
-  let duplicates = 0;
+  let duplicates = Number(internalDuplicates || 0);
   for (const entry of entries) {
     const signature = proxySignature(entry);
     if (known.has(signature)) {
@@ -683,19 +771,42 @@ async function importProxiesFromText(event) {
       await persistProxies(nextProxies);
       savedProxies = nextProxies;
     } catch (error) {
+      setProxyFeedback(proxyImportFeedbackNode, `Import échoué : ${error.message}`, "error");
       addLog("Import des proxys échoué", error.message, true);
       return;
     }
   }
 
-  proxyImportLinesInput.value = "";
   renderProxyList();
   const parts = [`${additions.length} proxy(s) importé(s)`];
   if (duplicates) parts.push(`${duplicates} doublon(s) ignoré(s)`);
   if (errors.length) parts.push(`${errors.length} ligne(s) invalide(s)`);
-  setStatus(`${parts.join(" · ")}.`);
+  const summary = `${parts.join(" · ")}.`;
+  setStatus(summary);
   if (errors.length) addLog("Lignes ignorées", errors.map((error) => `Ligne ${error.line} : ${error.message}`).join("\n"), true);
+
+  if (!additions.length) {
+    setProxyFeedback(
+      proxyImportFeedbackNode,
+      `Ces ${duplicates} proxy(s) figurent déjà dans la liste ci-dessus (${summary})`,
+      "warn",
+    );
+    if (typeof proxyListNode.scrollIntoView === "function") {
+      proxyListNode.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+    return;
+  }
+
+  proxyImportLinesInput.value = "";
   proxyDefaultPasswordInput.value = "";
+  setProxyFeedback(
+    proxyImportFeedbackNode,
+    `✓ ${summary} Voir la liste ci-dessus.`,
+    errors.length ? "warn" : "ok",
+  );
+  if (typeof proxyListNode.scrollIntoView === "function") {
+    proxyListNode.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
 }
 
 async function toggleProxy(id, enabled) {
@@ -1453,7 +1564,7 @@ function randomUnit() {
 function setConfigurationDisabled(disabled) {
   runConfigurationInputs.forEach((input) => { input.disabled = disabled; });
   proxyImportForm.querySelectorAll("textarea").forEach((element) => { element.disabled = disabled; });
-  for (const button of [saveProxyButton, cancelProxyEditButton]) button.disabled = disabled;
+  for (const button of [saveProxyButton, cancelProxyEditButton, clearProxiesButton]) button.disabled = disabled;
   proxyListNode.querySelectorAll("input, button").forEach((element) => { element.disabled = disabled; });
   for (const button of [cancelEditButton, selectAllTargetsButton, clearSelectionButton, applyCountToAllButton, applyDurationToAllButton, saveTargetButton]) {
     button.disabled = disabled;

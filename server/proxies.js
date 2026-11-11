@@ -29,6 +29,31 @@ export function parseProxyImport(text, { defaultUsername = '', defaultPassword =
   };
 }
 
+export function proxySignature(entry) {
+  return utils.proxySignature(entry);
+}
+
+export function proxyGatewayHint(entry) {
+  return utils.proxyGatewayHint(entry);
+}
+
+/** Signatures complètes des proxys déjà enregistrés (mot de passe de session compris). */
+export function existingProxySignatures(store, userId, secretKey) {
+  const signatures = new Set();
+  for (const summary of store.listProxies(userId)) {
+    try {
+      const row = store.getProxyRow(userId, summary.id);
+      const decrypted = decryptProxyRow(row, secretKey);
+      if (decrypted) {
+        signatures.add(utils.proxySignature(decrypted));
+        continue;
+      }
+    } catch { /* secret illisible : repli sur l'aperçu public */ }
+    signatures.add(`${summary.scheme}|${summary.host}|${summary.port}|${summary.username}|`);
+  }
+  return signatures;
+}
+
 /** Vérifie qu'un proxy pointe vers un hôte public et porte des identifiants. */
 export async function validateProxyEntry(entry) {
   return validateProxyConfiguration({

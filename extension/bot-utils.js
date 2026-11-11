@@ -115,19 +115,58 @@
       normalizeHost(proxy.host),
       Number(proxy.port) || 0,
       String(proxy.username == null ? "" : proxy.username),
+      String(proxy.password == null ? "" : proxy.password),
     ].join("|");
+  }
+
+  /**
+   * Extrait uniquement les balises publiques d'une passerelle (ex. Rayobyte
+   * `-country-US-session-abc123`), sans jamais exposer le mot de passe lui-même.
+   */
+  function proxyGatewayHint(proxy) {
+    if (!proxy) return "";
+    var combined = String(proxy.username == null ? "" : proxy.username) + " " + String(proxy.password == null ? "" : proxy.password);
+    var parts = [];
+    var countryMatch = combined.match(/(?:^|[-_:])country[-_]([A-Za-z]{2})(?=$|[-_:\s])/i);
+    if (countryMatch) parts.push(countryMatch[1].toUpperCase());
+    var sessionMatch = combined.match(/(?:^|[-_:])session[-_]([A-Za-z0-9]{1,24})(?=$|[-_:\s])/i);
+    if (sessionMatch) {
+      var sid = sessionMatch[1].length > 8 ? sessionMatch[1].slice(0, 8) + "…" : sessionMatch[1];
+      parts.push("session " + sid);
+    }
+    return parts.join(" · ");
+  }
+
+  function isValidPortToken(token) {
+    if (!/^\d{1,5}$/.test(String(token == null ? "" : token))) return false;
+    var value = Number(token);
+    return Number.isInteger(value) && value >= 1 && value <= 65535;
+  }
+
+  function isHostToken(token) {
+    var normalized = normalizeHost(token);
+    return Boolean(normalized) && (HOSTNAME_RE.test(normalized) || IPV4_RE.test(normalized));
   }
 
   function parseProxyLine(line, options) {
     var settings = options || {};
     var defaultScheme = normalizeScheme(settings.defaultScheme || "http") || "http";
-    var rest = String(line || "").trim();
+    var rest = String(line || "")
+      .replace(/[\uFEFF\u200B-\u200D]/g, "")
+      .replace(/\u00A0/g, " ")
+      .trim()
+      .replace(/^['"]+|['"]+$/g, "")
+      .trim();
     if (!rest) return { ok: false, message: "Ligne vide." };
+    if (rest.indexOf("\t") >= 0) {
+      rest = rest.replace(/\t+/g, ":");
+    }
 
     var scheme = "";
-    var schemeMatch = rest.match(/^(https?|socks5):\/\//i);
+    var schemeMatch = rest.match(/^(https?|socks5h?):\/\//i);
     if (schemeMatch) {
-      scheme = schemeMatch[1].toLowerCase();
+      var rawScheme = schemeMatch[1].toLowerCase();
+      scheme = rawScheme === "socks5h" ? "socks5" : rawScheme;
       rest = rest.slice(schemeMatch[0].length);
     }
 
@@ -143,16 +182,33 @@
 
     var atIndex = rest.lastIndexOf("@");
     if (atIndex >= 0) {
-      var userinfo = rest.slice(0, atIndex);
-      rest = rest.slice(atIndex + 1);
-      hasUserInfo = true;
-      var separator = userinfo.indexOf(":");
-      if (separator < 0) {
-        username = userinfo;
-        password = "";
-      } else {
-        username = userinfo.slice(0, separator);
-        password = userinfo.slice(separator + 1);
+      var beforeAt = rest.slice(0, atIndex);
+      var afterAt = rest.slice(atIndex + 1);
+      var beforeParts = beforeAt.split(":");
+      var afterParts = afterAt.split(":");
+      // Dans user:pass@host:port, la partie après @ est host:port (ou [ipv6]:port).
+      // Dans host:port:email@domaine:pass (format Rayobyte par défaut avec e-mail)
+      // ou host:port:user:mot@passe, la ligne débute déjà par host:port:…
+      var afterIsEndpoint = afterAt.indexOf("[") >= 0 ||
+        (afterParts.length >= 2 && isHostToken(afterParts[0]) && isValidPortToken(afterParts[1]));
+      var beforeStartsWithHostPort = beforeParts.length >= 3 &&
+        isHostToken(beforeParts[0]) &&
+        isValidPortToken(beforeParts[1]) &&
+        beforeParts[0].indexOf(".") >= 0;
+      var emailInHostPortUserPass = beforeStartsWithHostPort && beforeParts.length === 3 && afterParts.length === 2;
+
+      if (afterIsEndpoint && !emailInHostPortUserPass) {
+        var userinfo = beforeAt;
+        rest = afterAt;
+        hasUserInfo = true;
+        var separator = userinfo.indexOf(":");
+        if (separator < 0) {
+          username = userinfo;
+          password = "";
+        } else {
+          username = userinfo.slice(0, separator);
+          password = userinfo.slice(separator + 1);
+        }
       }
     }
 
@@ -182,33 +238,49 @@
     });
   }
 
+  function splitProxyLineSegments(line) {
+    if (line.indexOf(",") < 0 && line.indexOf(";") < 0) return [line];
+    var pieces = line.split(/[,;]+/).map(function (item) { return item.trim(); }).filter(Boolean);
+    if (pieces.length <= 1) return [line];
+    // Ne découpe sur « , » ou « ; » que si chaque segment contient « : » ou une tabulation (un proxy),
+    // pour ne jamais couper un mot de passe qui contiendrait une virgule ou un point-virgule.
+    var allLookLikeProxies = pieces.every(function (piece) { return piece.indexOf(":") > 0 || piece.indexOf("\t") > 0; });
+    return allLookLikeProxies ? pieces : [line];
+  }
+
   function parseProxyLines(text, options) {
     var settings = options || {};
     var entries = [];
     var errors = [];
     var duplicates = 0;
     var seen = Object.create(null);
-    var lines = String(text == null ? "" : text).split(/\r?\n/);
+    var cleanedText = String(text == null ? "" : text)
+      .replace(/[\uFEFF\u200B-\u200D]/g, "")
+      .replace(/\u00A0/g, " ");
+    var lines = cleanedText.split(/\r?\n/);
 
     lines.forEach(function (rawLine, index) {
       var line = rawLine.trim();
       if (!line || line.charAt(0) === "#") return;
-      var parsed = parseProxyLine(line, settings);
-      if (!parsed.ok) {
-        errors.push({ line: index + 1, message: parsed.message });
-        return;
-      }
-      var signature = proxySignature(parsed.value);
-      if (seen[signature]) {
-        // Doublon dans le texte collé : ignoré, mais compté pour le compte rendu.
-        duplicates += 1;
-        return;
-      }
-      seen[signature] = true;
-      // Numéro de ligne conservé : indispensable pour corriger un import de
-      // plusieurs milliers de lignes (sinon l'erreur est anonyme).
-      parsed.value.line = index + 1;
-      entries.push(parsed.value);
+      var segments = splitProxyLineSegments(line);
+      segments.forEach(function (segment) {
+        var parsed = parseProxyLine(segment, settings);
+        if (!parsed.ok) {
+          errors.push({ line: index + 1, message: parsed.message });
+          return;
+        }
+        var signature = proxySignature(parsed.value);
+        if (seen[signature]) {
+          // Doublon dans le texte collé : ignoré, mais compté pour le compte rendu.
+          duplicates += 1;
+          return;
+        }
+        seen[signature] = true;
+        // Numéro de ligne conservé : indispensable pour corriger un import de
+        // plusieurs milliers de lignes (sinon l'erreur est anonyme).
+        parsed.value.line = index + 1;
+        entries.push(parsed.value);
+      });
     });
 
     return { entries: entries, errors: errors, duplicates: duplicates };
@@ -879,6 +951,7 @@
     isBlockedHost: isBlockedHost,
     validateProxyEntry: validateProxyEntry,
     proxySignature: proxySignature,
+    proxyGatewayHint: proxyGatewayHint,
     parseProxyLine: parseProxyLine,
     parseProxyLines: parseProxyLines,
     proxyEndpoint: proxyEndpoint,
