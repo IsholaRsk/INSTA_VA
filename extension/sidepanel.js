@@ -1861,13 +1861,30 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
       // Attribution : une activation impossible ou un échec avant le clic (page non
       // chargée, tunnel refusé) est imputé au proxy. Après le clic, l'échec n'est
       // imputé au proxy que si le message trahit un problème réseau/proxy.
+      //
+      // Exception : un échec de DÉTECTION (panneau incapable de lire la page)
+      // ne dit rien de la qualité du proxy. Le compter comme un échec le
+      // désactivait après trois cycles alors que l'IP fonctionnait, comme le
+      // fait déjà le serveur autonome pour « libellé introuvable ».
+      const detectionFailure = errorLooksLikeDetectionFailure(failure);
       const blameProxy = !proxyApplied
-        ? proxyActivationAttempted
-        : (!clicked || errorLooksLikeProxyFailure(failure));
+        ? proxyActivationAttempted && !detectionFailure
+        : (detectionFailure ? false : (!clicked || errorLooksLikeProxyFailure(failure)));
       failure.proxyActive = blameProxy;
       if (blameProxy) failure.proxyError = String(failure.message || "Échec du cycle.").slice(0, 200);
+      failure.detectionFailure = detectionFailure;
     }
   }
+}
+
+/**
+ * Un échec de lecture de la page (détection impossible, libellé introuvable,
+ * page instable) vient du code ou du contenu de la page, jamais du réseau :
+ * il ne doit pas consommer le crédit d'échecs du proxy.
+ */
+function errorLooksLikeDetectionFailure(error) {
+  return /Impossible de repérer|Impossible de vérifier|libellé introuvable|libellés identiques|aucun élément cliquable|Aucun lien|Plusieurs éléments|page a changé|éléments cliquables/i
+    .test(String(error && error.message ? error.message : error));
 }
 
 function errorLooksLikeProxyFailure(error) {
@@ -2082,29 +2099,15 @@ async function findPrimaryLink(tabId) {
       const inNavigation = Boolean(element.closest(NAV));
       const isControl = element.tagName === 'BUTTON' || element.getAttribute('role') === 'button' ||
         (element.tagName === 'INPUT' && /^(button|submit)$/i.test(element.type));
-      // Le classement est délégué à bot-utils : la surface et la longueur du
-      // texte ne décident plus à la place du sens (lien de bio prioritaire,
-      // boutons d'action rétrogradés).
-      const ranking = InstaVAUtils.scoreClickable({
-        text: description.text,
-        href: description.href,
-        area: description.area,
-        kind: description.type,
-        inNavigation,
-        isControl,
-        tagName: description.tagName,
-        hasClickHandler: description.hasClickHandler,
-      });
+      // Aucun appel aux fonctions du panneau ici : ce code s'exécute DANS la
+      // page, où bot-utils n'est pas chargé. Le classement est fait juste
+      // après, côté panneau, avec la même fonction qu'avant (définition unique).
       visible.push({
         ...description,
         inNavigation,
         isControl,
-        score: ranking.score,
-        bioLink: ranking.bioLink,
-        actionButton: ranking.actionButton,
       });
     }
-    visible.sort((a, b) => b.score - a.score);
     return visible;
   })()`;
   const result = await sendCDP(tabId, "Runtime.evaluate", {
@@ -2115,11 +2118,29 @@ async function findPrimaryLink(tabId) {
   if (result.exceptionDetails) throw new Error("Impossible de repérer les éléments cliquables de la page.");
   const links = Array.isArray(result.result?.value) ? result.result.value : [];
   if (!links.length) return { links, picked: null };
-  if (links.length === 1) return { links, picked: { ...links[0], reason: `seul ${links[0].type} visible` } };
-  const main = links.filter((link) => !link.inNavigation);
-  const picked = (main.length ? main : links)[0];
+  // Classement ici, dans le panneau : `scoreClickable` vient de bot-utils, qui
+  // n'existe pas dans la page. L'appeler dans le contexte de la page levait
+  // « InstaVAUtils is not defined » et le cycle échouait sur
+  // « Impossible de repérer les éléments cliquables de la page. »
+  const scored = links.map((link) => {
+    const ranking = InstaVAUtils.scoreClickable({
+      text: link.text,
+      href: link.href,
+      area: link.area,
+      kind: link.type,
+      inNavigation: link.inNavigation,
+      isControl: link.isControl,
+      tagName: link.tagName,
+      hasClickHandler: link.hasClickHandler,
+    });
+    return { ...link, score: ranking.score, bioLink: ranking.bioLink, actionButton: ranking.actionButton };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  if (scored.length === 1) return { links: scored, picked: { ...scored[0], reason: `seul ${scored[0].type} visible` } };
+  const main = scored.filter((link) => !link.inNavigation);
+  const picked = (main.length ? main : scored)[0];
   return {
-    links,
+    links: scored,
     picked: { ...picked, reason: main.length ? `${picked.type} principal` : `${picked.type} principal (toute la page est en navigation)` },
   };
 }
