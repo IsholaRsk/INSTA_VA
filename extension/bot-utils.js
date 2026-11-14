@@ -587,31 +587,38 @@
   }
 
   /**
-   * Débit maximal d'une journée avec l'écart minimal entre deux visites.
-   * 5 minutes d'écart => 288 clics maximum par jour.
+   * Débit maximal d'une journée. Conservé pour décrire un débit théorique
+   * (l'affichage et les tests), mais il ne plafonne plus rien : le bot
+   * enchaîne les clics sans limite quotidienne.
    */
   function maxVisitsPerDay(minimumGapMs) {
-    var gap = Number(minimumGapMs) > 0 ? Number(minimumGapMs) : 5 * 60 * 1000;
+    var gap = Number(minimumGapMs) > 0 ? Number(minimumGapMs) : 0;
+    if (!gap) return Infinity;
     return Math.max(1, Math.floor(DAY_MS / gap));
   }
 
   /**
-   * Ajuste une sélection au rythme réellement tenable :
-   *  - au moins 100 clics par jour sur la durée choisie;
-   *  - au plus le débit maximal d'une journée (288 avec 5 minutes d'écart).
+   * Ajuste une sélection au rythme demandé.
+   *
+   * Plus de plafond quotidien : le nombre saisi est exécuté tel quel, même
+   * s'il implique des centaines de clics dans la journée. Le seul ajustement
+   * qui subsiste est le minimum de 100 clics par jour, qui relève un nombre
+   * trop faible plutôt que de l'abaisser.
+   *
    * Retourne { count, requested, minimum, maximum, adjusted }.
    */
-  function fitVisitsToRate(requested, days, minimumGapMs) {
+  function fitVisitsToRate(requested, days) {
     var wanted = Math.max(1, Math.floor(Number(requested) || 0));
     var span = Math.max(MIN_INTERVAL_DAYS, Math.floor(Number(days) || MIN_INTERVAL_DAYS));
-    var minimum = Math.min(dailyMinimumVisits(span), maxVisitsPerDay(minimumGapMs) * span);
-    var maximum = maxVisitsPerDay(minimumGapMs) * span;
-    var count = Math.min(Math.max(wanted, minimum), maximum);
+    var minimum = dailyMinimumVisits(span);
+    var count = Math.max(wanted, minimum);
     return {
       count: count,
       requested: wanted,
       minimum: minimum,
-      maximum: maximum,
+      // Plus de plafond : `maximum` vaut le total lui-même, pour ne pas mentir
+      // à l'interface qui l'affiche.
+      maximum: Math.max(count, wanted),
       adjusted: count !== wanted,
     };
   }
@@ -626,7 +633,7 @@
     var count = Math.max(1, Math.floor(Number(targetCount) || 0));
     if (normalizeTargetMode(mode) === "goal") return count;
     if (!settings.enforceDaily) return count;
-    return fitVisitsToRate(count, settings.days, settings.minimumGapMs).count;
+    return fitVisitsToRate(count, settings.days).count;
   }
 
   /** Nombre de visites à exécuter chaque jour : au moins 100, réparti sur la durée. */
@@ -648,14 +655,25 @@
     return quota;
   }
 
+  /** Pause par défaut entre deux clics d'une même série (ms). */
+  var DEFAULT_CHAIN_GAP_MS = 2500;
+
   /**
-   * Répartit `count` visites sur `days` jours.
-   * Chaque journée reçoit au moins 100 clics; les horaires d'une journée sont tirés
-   * entre le début et la fin de cette journée (au moins 5 minutes d'écart).
+   * Répartit `count` visites sur `days` jours, en les ENCHAÎNANT.
+   *
+   * Plus de plafond quotidien ni d'écart minimal de 5 minutes : chaque journée
+   * exécute son quota d'affilée, avec une pause courte et variable
+   * (DEFAULT_CHAIN_GAP_MS, surchargeable par `minimumGapMs`). Si la durée est
+   * trop courte pour le nombre demandé, le reliquat suit sans discontinuer
+   * au lieu d'être étalé sur des jours fictifs.
+   *
+   * `minimumGapMs: 0` enchaîne sans aucune pause.
    */
   function buildDailyRunTimes(count, days, startAt, options) {
     var settings = options || {};
-    var minimumGapMs = Number(settings.minimumGapMs) > 0 ? Number(settings.minimumGapMs) : 5 * 60 * 1000;
+    var gapMs = settings.minimumGapMs === undefined || settings.minimumGapMs === null
+      ? DEFAULT_CHAIN_GAP_MS
+      : Math.max(0, Number(settings.minimumGapMs) || 0);
     var random = typeof settings.random === "function" ? settings.random : Math.random;
     var span = Math.max(MIN_INTERVAL_DAYS, Math.floor(Number(days) || MIN_INTERVAL_DAYS));
     var total = Math.max(1, Math.floor(Number(count) || 0));
@@ -665,78 +683,35 @@
       quota = quota.map(function (value, index) { return index === 0 ? total : 0; });
     }
 
-    var cap = maxVisitsPerDay(minimumGapMs);
+    var pause = function () {
+      if (!gapMs) return 0;
+      var value = Number(random());
+      if (!Number.isFinite(value)) value = 0.5;
+      // ±25 % : le rythme n'est pas parfaitement mécanique, sans rallonger la série.
+      return Math.round(gapMs * (0.75 + Math.min(0.999999, Math.max(0, value)) * 0.5));
+    };
+
     var times = [];
-
-    // Réserve d'un jour : place `wanted` visites entre `from` et `until`,
-    // jamais à moins de `minimumGapMs` l'une de l'autre. Renvoie les horaires
-    // placés et le nombre de visites qui n'ont pas pu l'être.
-    function fillDay(from, until, wanted) {
-      var windowMs = until - from;
-      var fit = Math.min(wanted, Math.max(0, Math.floor((windowMs - 1000) / minimumGapMs) + 1));
-      if (fit <= 0) return { slots: [], carried: wanted };
-      var intervals = Math.max(0, fit - 1);
-      // Espace cumulé disponible *entre* les visites (marge de 1 s en fin de jour).
-      var usable = Math.max(0, windowMs - 1000 - intervals * minimumGapMs);
-      var weights = [];
-      var weightSum = 0;
-      for (var index = 0; index < intervals; index += 1) {
-        var value = -Math.log(Math.max(Number(random()), Number.MIN_VALUE));
-        if (!Number.isFinite(value) || value <= 0) value = 1;
-        weights.push(value);
-        weightSum += value;
-      }
-      var slots = [];
-      var cursor = from;
-      var used = 0;
-      var latest = until - 1000;
-      for (var slot = 0; slot < fit; slot += 1) {
-        if (slot > 0) {
-          var remaining = Math.max(0, usable - used);
-          var extra = remaining ? Math.min(remaining, usable * weights[slot - 1] / weightSum) : 0;
-          used += extra;
-          cursor += minimumGapMs + extra;
-        }
-        var at = Math.round(cursor);
-        if (at > latest) break;
-        if (slots.length && at - slots[slots.length - 1] < minimumGapMs) {
-          at = slots[slots.length - 1] + minimumGapMs;
-          if (at > latest) break;
-        }
-        slots.push(at);
-      }
-      return { slots: slots, carried: wanted - slots.length };
-    }
-
+    var cursor = startAt;
     for (var day = 0; day < span && times.length < total; day += 1) {
-      var perDay = Math.min(quota[day], cap);
-      if (!perDay) continue;
+      var wanted = Math.min(quota[day], total - times.length);
+      if (!wanted) continue;
+      // Chaque journée démarre à son propre créneau : le lot du jour s'enchaîne
+      // depuis là, sans attendre la fin de la journée.
       var dayStart = day === 0 ? startAt : startAt + day * DAY_MS;
-      var dayEnd = dayStart + DAY_MS;
-      // L'écart minimal s'applique aussi entre le dernier clic de la veille et
-      // le premier du jour : la fenêtre ne commence jamais trop tôt.
-      if (times.length) dayStart = Math.max(dayStart, times[times.length - 1] + minimumGapMs);
-      var placed = fillDay(dayStart, dayEnd, perDay);
-      times = times.concat(placed.slots);
-      if (placed.carried > 0) {
-        if (day + 1 < span) quota[day + 1] = Math.min(cap, quota[day + 1] + placed.carried);
-        else {
-          // Dernier jour déjà entamé : le reliquat suit, à la cadence minimale.
-          var tail = dayEnd;
-          for (var extra = 0; extra < placed.carried && times.length < total; extra += 1) {
-            times.push(tail + extra * minimumGapMs);
-          }
-        }
+      cursor = times.length ? Math.max(cursor, dayStart, times[times.length - 1]) : dayStart;
+      for (var index = 0; index < wanted; index += 1) {
+        if (times.length) cursor += pause();
+        times.push(cursor);
       }
     }
 
-    // Sécurité : ne jamais rendre moins d'horaires que demandé.
-    var last = times.length ? times[times.length - 1] : startAt;
+    // Sécurité : la durée ne borne jamais le nombre demandé.
     while (times.length < total) {
-      last += minimumGapMs;
-      times.push(last);
+      cursor = times.length ? times[times.length - 1] + pause() : startAt;
+      times.push(cursor);
     }
-    return times.sort(function (a, b) { return a - b; });
+    return times.slice(0, total);
   }
 
   /**
@@ -1133,6 +1108,7 @@
     dailyClickTarget: dailyClickTarget,
     dailyVisitQuota: dailyVisitQuota,
     buildDailyRunTimes: buildDailyRunTimes,
+    DEFAULT_CHAIN_GAP_MS: DEFAULT_CHAIN_GAP_MS,
     executionBounds: executionBounds,
     planVisits: planVisits,
     nextVisitDelayMs: nextVisitDelayMs,

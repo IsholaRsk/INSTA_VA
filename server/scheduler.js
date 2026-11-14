@@ -1,12 +1,11 @@
-import { clicksAllowedToday, plannedCountForDay, gapForTarget } from './schedule.js';
-import { dayKeyIn } from './time.js';
+import { clicksAllowedToday, gapForTarget } from './schedule.js';
 
 /**
  * Sélection des visites à exécuter maintenant.
  *
- * Le calendrier fixe les horaires « nominaux » ; cette couche ajoute les règles
- * métier que le calendrier seul ne peut pas garantir (journée manquée, total
- * faible relevé à 100 clics/jour) en comparant le prévu au réellement fait.
+ * Le calendrier fixe les horaires ; cette couche décide laquelle des visites
+ * dues part maintenant. Aucun plafond quotidien : une visite due est exécutable
+ * immédiatement, la série enchaîne ses clics.
  */
 export function createScheduler({ store, config, log = () => {} }) {
   const lastCycleAt = new Map();
@@ -48,37 +47,18 @@ export function createScheduler({ store, config, log = () => {} }) {
       ORDER BY v.scheduled_at ASC
       LIMIT 60`).all(userId, new Date(now).toISOString(), userId);
 
-    const today = dayKeyIn(config.timeZone, now);
-    const plannedByTarget = new Map();
-
     for (const visit of due) {
-      // En mode objectif, la série s'enchaîne avec une pause courte ; en
-      // intervalle, l'écart minimum de 5 minutes s'applique entre deux clics.
+      // Pause éventuelle entre deux clics (0 par défaut : la série enchaîne).
       const gap = gapForTarget(visit.mode, { goalGapMs: config.goalGapMs });
       if (now - (lastCycleAt.get(visit.target_id) || 0) < gap) continue;
 
-      if (!plannedByTarget.has(visit.target_id)) {
-        const scheduled = store.raw.prepare(
-          "SELECT scheduled_at FROM visits WHERE target_id = ? AND status <> 'cancelled'",
-        ).all(visit.target_id).map((row) => row.scheduled_at);
-        plannedByTarget.set(visit.target_id, plannedCountForDay(scheduled, config.timeZone, today));
-      }
-
-      const doneToday = store.clicksOnDay(userId, visit.target_id, today);
       const { done } = targetProgress(visit.target_id);
       const totalTarget = visit.mode === 'goal' ? Number(visit.execution_target) : Number(visit.effective_total);
       const remaining = Math.max(0, totalTarget - done);
       if (!remaining) continue;
 
-      const plannedToday = plannedByTarget.get(visit.target_id);
-      const allowance = clicksAllowedToday({
-        mode: visit.mode,
-        plannedToday,
-        doneToday,
-        backlog: Math.max(0, plannedToday - doneToday),
-        remaining,
-        minimum: Number(visit.daily_minimum) || 0,
-      });
+      // Plus de plafond quotidien : seule l'échéance du prochain créneau compte.
+      const allowance = clicksAllowedToday({ remaining });
       if (allowance <= 0) continue;
 
       // Déjà en attente de confirmation : ne pas réclamer la même visite en boucle.

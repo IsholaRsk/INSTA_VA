@@ -184,7 +184,6 @@ function describeTargetLocally(target) {
   if (target.mode === 'goal') return `Objectif : ${target.execution_target} clics en série continue.`;
   const parts = [`${target.duration_days} jour(s)`, `${target.effective_total} clics`];
   if (target.effective_total > target.execution_target) parts.push(`relevé (min. 100/jour)`);
-  if (target.effective_total < target.execution_target) parts.push(`plafonné à 288/jour`);
   return `Intervalle : ${parts.join(' · ')}`;
 }
 
@@ -286,7 +285,7 @@ function syncModeFields() {
   $('#target-duration').required = interval;
 }
 
-/** Aperçu local du total réel : mêmes règles que le serveur (100 min, 288 max). */
+/** Aperçu local du total réel : mêmes règles que le serveur (minimum 100/jour, aucun plafond). */
 function updatePlanPreview() {
   const preview = $('#plan-preview');
   const mode = $('#target-mode').value;
@@ -300,13 +299,12 @@ function updatePlanPreview() {
     preview.textContent = `Objectif : ${requested} clics en série continue, sans durée.`;
     return;
   }
+  // Plus de plafond : le total demandé est exécuté tel quel, et seul le
+  // minimum de 100 clics/jour peut le relever.
   const minimum = 100 * days;
-  const maximum = 288 * days;
-  const total = Math.min(Math.max(requested, minimum), maximum);
-  const notes = [];
-  if (total > requested) notes.push(`relevé à ${total} pour tenir 100 clics/jour`);
-  if (requested > maximum) notes.push(`ramené à ${total} : 288 clics/jour maximum`);
-  preview.textContent = `Sur ${days} jour${days > 1 ? 's' : ''} : ${total} clics au total, soit environ ${Math.round(total / days)} par jour.${notes.length ? ` (${notes.join('; ')})` : ''}`;
+  const total = Math.max(requested, minimum);
+  const notes = total > requested ? [`relevé à ${total} pour tenir 100 clics/jour`] : [];
+  preview.textContent = `Sur ${days} jour${days > 1 ? 's' : ''} : ${total} clics au total, soit environ ${Math.round(total / days)} par jour. Clics enchaînés, sans plafond quotidien.${notes.length ? ` (${notes.join('; ')})` : ''}`;
 }
 
 async function deleteTarget(target) {
