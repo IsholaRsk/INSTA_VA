@@ -303,14 +303,26 @@ export function createApp({
     // La question à laquelle l'écran doit répondre : « est-ce que toute ma
     // liste sert vraiment ? ». On expose donc le nombre de cycles par
     // passerelle, et une entrée jamais servie reste visible à 0.
-    const rotation = proxies.map((proxy) => ({
-      id: proxy.id,
-      usage_key: proxy.usage_key || '',
-      cycles: usage[proxy.usage_key] ?? 0,
-      gateway: Boolean(utils.isRotatingGateway(proxy)),
-      session: proxy.last_session || null,
-    }));
-    const served = rotation.filter((entry) => entry.cycles > 0).length;
+    // `usage` est un compteur par passerelle, partagé par toutes les entrées du
+    // même hôte : l'afficher tel quel sur chaque ligne donnait « 6 cycles » à
+    // trois entrées pour 6 cycles au total. On ne le met donc que sur la
+    // première entrée de la passerelle, et on donne aussi le total.
+    const seenKeys = new Set();
+    const rotation = proxies.map((proxy) => {
+      const key = proxy.usage_key || '';
+      const firstOfGateway = Boolean(key) && !seenKeys.has(key);
+      if (key) seenKeys.add(key);
+      return {
+        id: proxy.id,
+        usage_key: key,
+        cycles: firstOfGateway ? (usage[key] ?? 0) : null,
+        gateway: Boolean(utils.isRotatingGateway(proxy)),
+        session: proxy.last_session || null,
+      };
+    });
+    // Une passerelle compte servie dès qu'elle a au moins un cycle.
+    const served = [...new Set(proxies.map((proxy) => proxy.usage_key).filter(Boolean))]
+      .filter((key) => (usage[key] || 0) > 0).length;
     sendJson(res, 200, {
       proxies,
       state,
