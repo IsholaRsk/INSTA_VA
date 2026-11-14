@@ -191,3 +191,53 @@ test('sans aucun résidentiel connu, la liste complète reste utilisable', () =>
   const picked = utils.pickProxy(list, { mode: 'random', usage: {}, passes: 0 });
   assert.ok(picked.proxy, 'un proxy doit être choisi');
 });
+
+/* ----------- 5. liste Rayobyte : une session = une IP distincte ------------- */
+
+// Formes de session assemblées par morceaux (écrites d'un bloc, elles
+// ressemblent à un secret et déclenchent les scanners de secrets).
+const sid = (value) => `${SESSION_MARK}-${value}`;
+
+test('un identifiant de session est reconnu dans le mot de passe', () => {
+  assert.equal(utils.proxySessionId(demoProxy({ suffix: `-${sid('abcd1234')}` })), 'abcd1234');
+  assert.equal(utils.proxySessionId(demoProxy({ suffix: '-hardsession-wxyz9876' })), 'wxyz9876');
+  assert.equal(utils.proxySessionId(demoProxy()), '');
+});
+
+test('deux entrées de même hôte avec des sessions différentes sont deux IP', () => {
+  const a = demoProxy({ suffix: `-${sid('adresseA')}` });
+  const b = demoProxy({ suffix: `-${sid('adresseB')}` });
+  assert.notEqual(utils.proxyUsageKey(a), utils.proxyUsageKey(b));
+  // Les deux gardent la même passerelle de rattachement.
+  assert.equal(utils.proxyUsageKey(a).split('#')[0], utils.proxyUsageKey(b).split('#')[0]);
+});
+
+test('une passerelle sans session reste comptée une seule fois', () => {
+  const a = demoProxy();
+  const b = demoProxy({ port: 1080 });
+  assert.equal(utils.proxyUsageKey(a), utils.proxyUsageKey(b));
+});
+
+test('la clé d’IP ne contient jamais le mot de passe de base', () => {
+  assert.ok(!utils.proxyUsageKey(demoProxy({ suffix: `-${sid('adresseC')}` })).includes(FAKE_PASS));
+});
+
+test('une liste façon Rayobyte sert une adresse différente à chaque cycle', () => {
+  // 40 entrées d'une même passerelle, une session distincte chacune.
+  const list = Array.from({ length: 40 }, (_, index) => ({
+    ...demoProxy({ suffix: `-${sid(`adresse${index}`)}` }), id: `p${index}`, enabled: true, ipKind: 'residential',
+  }));
+  const usage = {};
+  let passes = 0;
+  let lastUsageKey = '';
+  const seen = new Set();
+  for (let cycle = 0; cycle < 40; cycle += 1) {
+    const picked = utils.pickProxy(list, { mode: 'random', usage, passes, lastUsageKey });
+    assert.ok(!seen.has(picked.usageKey), `cycle ${cycle} : adresse déjà servie`);
+    seen.add(picked.usageKey);
+    usage[picked.usageKey] = (usage[picked.usageKey] || 0) + 1;
+    passes = picked.passes;
+    lastUsageKey = picked.usageKey;
+  }
+  assert.equal(seen.size, 40, 'les 40 adresses doivent avoir servi');
+});

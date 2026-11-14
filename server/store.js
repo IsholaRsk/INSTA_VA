@@ -392,10 +392,12 @@ export function createStore(db) {
       db.exec('BEGIN');
       try {
         for (const row of rows) {
-          // Clé d'usage : le protocole et l'hôte, pas le port. Chez un
-          // fournisseur résidentiel, deux ports du même hôte sortent par des
-          // IP différentes, mais une seule passerelle suffit à tourner.
-          const usageKey = `${String(row.scheme || 'http').toLowerCase()}://${String(row.host || '').toLowerCase()}`;
+          // La clé vient de l'import (elle inclut la session quand l'entrée en
+          // porte une). Repli sur hôte seul pour un appelant qui n'en fournit
+          // pas : la ligne reste utilisable, elle compte alors comme la
+          // passerelle entière.
+          const usageKey = row.usage_key
+            || `${String(row.scheme || 'http').toLowerCase()}://${String(row.host || '').toLowerCase()}`;
           insert.run({ user_id: userId, created_at: now, label: '', ...row, usage_key: usageKey });
         }
         db.exec('COMMIT');

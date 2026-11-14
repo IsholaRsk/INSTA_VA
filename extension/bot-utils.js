@@ -195,11 +195,57 @@
     };
   }
 
-  /** Clé d'usage : une passerelle compte une fois, quel que soit son port. */
+  /**
+   * Vraie IP de sortie portée par l'identifiant (session figée d'un fournisseur
+   * résidentiel), en clair. Rayobyte : `-session-<id>` ou `-hardsession-<id>`.
+   *
+   * Un identifiant de session est ce qui distingue deux adresses sortant par la
+   * même passerelle : c'est donc lui, et lui seul, qui identifie l'IP.
+   */
+  function proxySessionId(proxy) {
+    if (!proxy) return "";
+    var source = String(proxy.password == null ? "" : proxy.password) + " " +
+      String(proxy.username == null ? "" : proxy.username);
+    var match = source.match(/(?:^|[-_:\s])(?:hardsession|session)[-_]([A-Za-z0-9]{1,64})(?=$|[-_:\s])/i);
+    return match ? match[1] : "";
+  }
+
+  /**
+   * Clé d'usage : ce que la rotation doit traiter comme « une IP ».
+   *
+   * - Passerelle sans session (`host:8000` générique) : la clé est l'hôte, car
+   *   l'adresse change à chaque connexion et on ne peut pas la distinguer.
+   * - Entrée avec sa propre session (`-session-abc123`) : la clé est
+   *   `hôte#session`. Chaque ligne est alors une adresse distincte, ce qui est
+   *   exactement le cas d'une liste Rayobyte où 3700 lignes ne diffèrent que
+   *   par la session. Les compter comme une seule passerelle revenait à
+   *   n'utiliser qu'une fraction de la rotation.
+   *
+   * Le port est volontairement ignoré : il ne distingue pas l'IP de sortie.
+   * Aucune empreinte du mot de passe de base n'est conservée, uniquement
+   * l'identifiant de session (déjà stocké en clair dans `proxies.last_session`).
+   */
   function proxyUsageKey(proxy) {
     if (!proxy) return "";
-    return ((normalizeScheme(proxy.scheme || "http") || "http") + "://" +
-      normalizeHost(proxy.host)).toLowerCase();
+    // Clé déjà calculée à l'import quand le mot de passe était disponible
+    // (côté serveur, la liste ne porte que des identifiants masqués).
+    var stored = String(proxy.usageKey != null ? proxy.usageKey : (proxy.usage_key != null ? proxy.usage_key : "")).trim();
+    if (stored) return stored;
+    var scheme = (normalizeScheme(proxy.scheme || "http") || "http").toLowerCase();
+    var base = scheme + "://" + normalizeHost(proxy.host);
+    var session = proxySessionId(proxy);
+    return session ? base + "#" + session : base;
+  }
+
+  /**
+   * Nature d'une entrée pour l'affichage : plusieurs entrées d'une même
+   * passerelle mais toutes avec leur session sont des IP tournantes distinctes.
+   */
+  function proxyGatewayLabel(proxy) {
+    if (!proxy) return "";
+    var base = (normalizeScheme(proxy.scheme || "http") || "http") + "://" + normalizeHost(proxy.host);
+    var session = proxySessionId(proxy);
+    return session ? base + " · session " + (session.length > 8 ? session.slice(0, 8) + "…" : session) : base;
   }
 
   function proxySignature(proxy) {
@@ -1112,6 +1158,8 @@
     isRotatingGateway: isRotatingGateway,
     buildProxySession: buildProxySession,
     proxyUsageKey: proxyUsageKey,
+    proxySessionId: proxySessionId,
+    proxyGatewayLabel: proxyGatewayLabel,
     hasStickySession: hasStickySession,
     hasCountryTargeting: hasCountryTargeting,
     DEFAULT_PROXY_PORTS: DEFAULT_PROXY_PORTS,
