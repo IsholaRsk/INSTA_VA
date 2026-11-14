@@ -65,6 +65,20 @@ export async function validateProxyEntry(entry) {
   });
 }
 
+/**
+ * Clé d'usage d'une entrée : ce que la rotation traite comme « une IP ».
+ *
+ * Elle est calculée ici, à l'import, parce que c'est le seul endroit où le mot
+ * de passe est disponible en clair. Une liste Rayobyte de 3700 lignes ne
+ * diffère que par `-session-XXXXXXXX` : sans cette session dans la clé, les
+ * 3700 adresses comptaient pour une seule passerelle et la rotation n'en
+ * utilisait qu'une poignée. Aucune empreinte du mot de passe de base n'est
+ * conservée, uniquement l'identifiant de session.
+ */
+export function usageKeyFor(entry) {
+  return utils.proxyUsageKey(entry);
+}
+
 /** Prépare une ligne de base de données à partir d'une entrée validée. */
 export function proxyRow(entry, secretKey, id, label = '') {
   const secret = JSON.stringify({ username: entry.username, password: entry.password });
@@ -76,6 +90,7 @@ export function proxyRow(entry, secretKey, id, label = '') {
     port: entry.port,
     username_masked: maskValue(entry.username),
     secret_box: encryptSecret(secret, secretKey),
+    usage_key: usageKeyFor(entry),
   };
 }
 
@@ -130,8 +145,8 @@ export function nextProxy(store, userId, { random = Math.random, sessionId = nul
     cursor: state.cursor,
     usage,
     passes: Number(state.passes || 0),
-    // Jamais deux cycles de suite par la même passerelle.
-    lastUsageKey: lastRow ? (lastRow.usage_key || utils.proxyUsageKey(lastRow)) : '',
+    // Jamais deux cycles de suite par la même adresse.
+    lastUsageKey: lastRow ? (lastRow.usage_key || '') : '',
   }, random);
   if (!picked?.proxy) return null;
 

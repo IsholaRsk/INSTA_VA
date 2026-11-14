@@ -331,9 +331,14 @@ export function createApp({
         count: proxies.length,
         enabled: proxies.filter((proxy) => proxy.enabled).length,
         cycles: proxies.reduce((sum, proxy) => sum + proxy.cycles, 0),
-        // Passerelles distinctes servies : le chiffre qui prouve que la
-        // rotation ne tourne pas toujours sur la même entrée.
+        // IP distinctes (une par passerelle, ou une par session figée). C'est
+        // le chiffre qui prouve que la rotation tourne sur toute la liste.
         gateways: new Set(proxies.map((proxy) => proxy.usage_key).filter(Boolean)).size,
+        // Dont combien viennent d'une session figée : autant d'adresses
+        // différentes derrière une seule passerelle.
+        sessions: new Set(proxies.map((proxy) => proxy.usage_key).filter((key) => key && key.includes('#')).map((key) => key.split('#')[0])).size === 0
+          ? 0
+          : proxies.filter((proxy) => String(proxy.usage_key || '').includes('#')).length,
         served,
         never_used: proxies.filter((proxy) => proxy.enabled && !(usage[proxy.usage_key] > 0)).length,
         passes: Number(state.passes || 0),
@@ -507,21 +512,30 @@ export function createApp({
       rotation: (() => {
         const usage = store.getProxyUsage(user.id);
         const state = store.getProxyState(user.id);
-        const keys = new Set(proxies.filter((proxy) => proxy.enabled).map((proxy) => proxy.usage_key).filter(Boolean));
+        const enabled = proxies.filter((proxy) => proxy.enabled);
+        const keys = new Set(enabled.map((proxy) => proxy.usage_key).filter(Boolean));
         const served = [...keys].filter((key) => usage[key] > 0).length;
-        const gateways = proxies.filter((proxy) => proxy.enabled && utils.isRotatingGateway(proxy)).length;
+        const gateways = enabled.filter((proxy) => utils.isRotatingGateway(proxy)).length;
+        // Entrées qui portent leur propre session : chacune est une adresse
+        // distincte, même si toutes sortent par la même passerelle.
+        const sessions = enabled.filter((proxy) => String(proxy.usage_key || '').includes('#')).length;
+        const hosts = new Set(enabled.map((proxy) => utils.proxyUsageKey({ ...proxy, password: '' }))).size;
         return {
           gateways: keys.size,
           served,
           never_used: keys.size - served,
           passes: Number(state.passes || 0),
           rotating_gateways: gateways,
-          sticky_per_execution: gateways > 0,
+          sticky_per_execution: sessions > 0 || gateways > 0,
+          hosts,
+          sessions,
           summary: keys.size === 0
             ? 'Aucun proxy actif : le bot sortira par l’IP du VPS.'
-            : gateways > 0
-              ? `${served}/${keys.size} passerelle(s) déjà servie(s). Chaque exécution demande une IP figée (session courte) : une visite = une adresse.`
-              : `${served}/${keys.size} proxy(s) déjà servi(s). Adresses fixes : une visite = une adresse, sans session à créer.`,
+            : sessions > 0
+              ? `${served}/${keys.size} adresse(s) déjà servie(s) sur ${hosts} passerelle(s). ${sessions} entrée(s) portent leur propre session : chacune sort par une IP distincte, la rotation les traite séparément.`
+              : gateways > 0
+                ? `${served}/${keys.size} passerelle(s) déjà servie(s). Chaque exécution demande une IP figée (session courte) : une visite = une adresse.`
+                : `${served}/${keys.size} proxy(s) déjà servi(s). Adresses fixes : une visite = une adresse, sans session à créer.`,
         };
       })(),
       rules: {
