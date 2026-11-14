@@ -650,7 +650,12 @@ function renderProxies() {
     // Cycles servis par cette passerelle, et IP figée du dernier cycle.
     const usageEntry = proxyUsage.get(proxy.usage_key);
     if (usageEntry) {
-      tags.append(node('span', `proxy-tag ${usageEntry.cycles > 0 ? 'is-good' : 'is-muted'}`, `${usageEntry.cycles} cycle(s) sur cette passerelle`));
+      // Le compteur est celui de la passerelle : on ne l'affiche que sur sa
+      // première ligne, sinon trois entrées du même hôte annoncent trois fois
+      // le même total.
+      if (usageEntry.cycles !== null && usageEntry.cycles !== undefined) {
+        tags.append(node('span', `proxy-tag ${usageEntry.cycles > 0 ? 'is-good' : 'is-muted'}`, `${usageEntry.cycles} cycle(s) sur cette passerelle`));
+      }
       if (usageEntry.gateway) tags.append(node('span', 'proxy-tag is-muted', 'IP tournante'));
       if (usageEntry.session) tags.append(node('span', 'proxy-tag is-muted', `session ${usageEntry.session}`));
     }
