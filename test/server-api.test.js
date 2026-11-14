@@ -110,7 +110,7 @@ test('cible : la durée en jours relève le total au minimum de 100 clics par jo
   } finally { await ctx.close(); }
 });
 
-test('lancement : calendrier de visites avec 288 clics maximum par jour', async () => {
+test('lancement : le calendrier enchaîne les clics, sans plafond quotidien', async () => {
   const ctx = await startServer();
   try {
     const { cookie } = await call(ctx, 'POST', '/api/auth/register', { email: 'b@exemple.test', password: 'motdepasse-solide' });
@@ -119,24 +119,21 @@ test('lancement : calendrier de visites avec 288 clics maximum par jour', async 
       executionTarget: 300, durationDays: 1,
     }, cookie);
     assert.equal(target.status, 201);
-    assert.equal(target.data.target.effective_total, 288);
+    // Plus de plafond à 288 : les 300 clics sont conservés tels quels.
+    assert.equal(target.data.target.effective_total, 300);
 
     const started = await call(ctx, 'POST', '/api/start', { targetIds: [target.data.target.id], confirmClicks: false }, cookie);
     assert.equal(started.status, 201);
-    assert.equal(started.data.plannedVisits, 288);
-    assert.equal(started.data.targets[0].visits, 288);
+    assert.equal(started.data.plannedVisits, 300);
+    assert.equal(started.data.targets[0].visits, 300);
 
     const visits = ctx.store.listVisits(ctx.store.listUsers()[0].id, { limit: 500 });
-    const byDay = new Map();
-    for (const visit of visits) {
-      const day = visit.scheduled_at.slice(0, 10);
-      byDay.set(day, (byDay.get(day) || 0) + 1);
-    }
-    assert.ok([...byDay.values()].every((count) => count <= 288), `répartition ${JSON.stringify([...byDay])}`);
-    // Chaque journée respecte un écart minimal de 5 minutes entre deux visites.
     const sorted = visits.map((visit) => Date.parse(visit.scheduled_at)).sort((a, b) => a - b);
+    // Tous les clics sont planifiés dans la journée, enchaînés.
+    assert.equal(sorted.length, 300);
+    assert.ok(sorted[sorted.length - 1] - sorted[0] < 86_400_000, 'toute la série tient dans la journée');
     for (let index = 1; index < sorted.length; index += 1) {
-      assert.ok(sorted[index] - sorted[index - 1] >= 5 * 60 * 1000 - 1000, 'écart de 5 minutes respecté');
+      assert.ok(sorted[index] - sorted[index - 1] < 60_000, 'clics enchaînés, sans écart de 5 minutes');
     }
 
     const busy = await call(ctx, 'POST', '/api/start', { targetIds: [target.data.target.id] }, cookie);
@@ -144,7 +141,7 @@ test('lancement : calendrier de visites avec 288 clics maximum par jour', async 
 
     const stopped = await call(ctx, 'POST', '/api/stop', { runId: started.data.run.id }, cookie);
     assert.equal(stopped.status, 200);
-    assert.equal(stopped.data.cancelled, 288);
+    assert.equal(stopped.data.cancelled, 300);
   } finally { await ctx.close(); }
 });
 

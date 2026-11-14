@@ -390,7 +390,7 @@ Il faut distinguer deux pages Cloudflare, qui n'appellent pas la même conduite 
 Sur un refus définitif :
 
 - le cycle **n'est pas imputé au proxy** — le site refuse l'accès en bloc, ce n'est pas ton proxy qui est en cause. Sans cette précaution, un site bloquant aurait désactivé tes 69 proxys en 69 cycles ;
-- la série est **arrêtée après trois refus consécutifs** au lieu d'être rejouée jusqu'à 288 fois dans la journée pour rien ;
+- la série est **arrêtée après trois refus consécutifs** au lieu d'être rejouée jusqu'à la fin du plan pour rien ;
 - le journal affiche le motif : *« page Cloudflare "Sorry, you have been blocked", erreur 1020 »*.
 
 Aucun réglage ne fait passer un 1020 : c'est une décision du site, prise avant tout chargement de page. Seul un proxy résidentiel — et parfois rien — change le résultat.
@@ -495,7 +495,7 @@ Le bot avance maintenant à la vitesse de Chromium, plus à celle d'un minuteur.
 
 Mesuré : **20 visites enchaînées en 53 ms** au lieu de ~150 s avec les anciens délais (hors temps réel de chargement des pages).
 
-Le mode **intervalle** garde ses 5 minutes entre deux clics : c'est la règle du calendrier, elle n'est pas touchée.
+Le mode **intervalle** n'impose plus d'écart entre deux clics : le calendrier enchaîne lui aussi, avec une pause courte. `INSTAVA_GOAL_GAP_MS` permet d'ajouter volontairement une pause (0 par défaut).
 
 **Toutes les tentatives sont faites, même en cas de blocage.** L'arrêt automatique de série après 3 refus 1020 a été **supprimé** : plus aucune visite n'est annulée par le bot. Un blocage est consigné visite par visite, et la série continue jusqu'au dernier clic prévu.
 
@@ -553,7 +553,7 @@ Ce cycle **n'est pas compté** dans les clics du jour, puisque le site n'a jamai
 | `Executable doesn't exist` | Chromium absent | Docker : reconstruire l'image. systemd : `npx playwright install --with-deps chromium` |
 | « Aucun lien ou bouton visible ne correspond » | Libellé différent sur la page | Utilise le texte affiché exact ; vide le champ pour laisser le bot choisir |
 | « Plusieurs éléments correspondent » | Libellé ambigu | Précise le texte (accents, casse ignorés, mais le libellé doit être unique) |
-| Les cycles ne partent plus | Écart de 5 minutes non écoulé, ou quota du jour atteint | Vérifie **Clics du jour** : 288 max par jour et par cible |
+| Les cycles ne partent plus | Créneau pas encore échu, ou proxy indisponible | Vérifie la prochaine échéance et l'état des proxys ; il n'y a plus de quota quotidien |
 | « Page de vérification Cloudflare » | IP de datacenter mal notée, ou navigateur détecté | Chapitre **8 bis** : configure un proxy résidentiel Webshare |
 | Session expirée sans cesse | Cookie `Secure` en HTTP | `INSTAVA_SECURE_COOKIES=false` (uniquement en réseau privé HTTP) |
 | Page blanche après mise à jour | Service worker en cache | Recharge en forçant (Safari : appui long sur ⟳), ou réinstalle la PWA |
@@ -603,6 +603,6 @@ Chaque cycle affiche une ligne du type :
 | Cron Vercel toutes les 5 min | Boucle interne toutes les 5 s |
 | Durée en semaines, tirage ±10 | Durée en **jours**, total exact, minimum **100 clics/jour** |
 | Clic sur lien uniquement | Clic sur **lien ou bouton** |
-| 300 visites max par lancement | Jusqu'à 1 000 000, plafonné par la physique (288/jour/cible) |
+| 300 visites max par lancement | Jusqu'à 1 000 000, sans plafond quotidien |
 
 Les dossiers `api/`, `lib/`, `supabase/` et `vercel.json` de l'ancienne version sont conservés à titre de référence mais **ne sont plus utilisés** : tu peux les supprimer.

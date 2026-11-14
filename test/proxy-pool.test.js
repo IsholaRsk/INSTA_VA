@@ -233,11 +233,14 @@ test('interval mode runs the exact count but keeps at least 100 clicks per day',
   assert.equal(utils.planVisits('interval', 500, { enforceDaily: true, days: 3 }), 500);
   assert.equal(utils.dailyMinimumVisits(1), 100);
   assert.equal(utils.dailyMinimumVisits(7), 700);
-  // Débit maximal : 5 minutes d'écart => 288 clics par jour.
-  assert.equal(utils.maxVisitsPerDay(5 * 60 * 1000), 288);
-  assert.deepEqual(utils.fitVisitsToRate(40, 1), { count: 100, requested: 40, minimum: 100, maximum: 288, adjusted: true });
-  assert.equal(utils.fitVisitsToRate(500, 1).count, 288);
-  assert.equal(utils.fitVisitsToRate(2000, 5).count, 1440);
+  // Plus de plafond quotidien : le total demandé est exécuté tel quel.
+  assert.equal(utils.maxVisitsPerDay(), Infinity);
+  assert.equal(utils.maxVisitsPerDay(5 * 60 * 1000), 288, 'débit théorique, plus appliqué');
+  // Seul le minimum de 100 clics/jour relève un total trop faible.
+  assert.deepEqual(utils.fitVisitsToRate(40, 1), { count: 100, requested: 40, minimum: 100, maximum: 100, adjusted: true });
+  assert.equal(utils.fitVisitsToRate(500, 1).count, 500);
+  assert.equal(utils.fitVisitsToRate(2000, 5).count, 2000);
+  assert.equal(utils.fitVisitsToRate(9000, 1).count, 9000, '9000 clics sur 1 jour ne sont plus ramenés');
 });
 
 test('batched visits keep a jittered delay around the base interval', () => {
@@ -265,21 +268,46 @@ test('target modes describe what the bot will do', () => {
   assert.match(utils.describeTargetPlan({ mode: 'interval', executionTarget: 10, durationDays: 7, linkLabel: '' }), /10 sur 7 jour\(s\)/);
 });
 
-test('daily planning spreads visits over days with a real minimum gap', () => {
+test('daily planning chains clicks with no gap and no daily cap', () => {
   const start = Date.parse('2026-11-08T00:00:00Z');
-  const times = utils.buildDailyRunTimes(300, 1, start);
+  const random = () => 0.5;
+  const times = utils.buildDailyRunTimes(300, 1, start, { random });
   assert.equal(times.length, 300);
-  for (let index = 1; index < times.length; index += 1) {
-    assert.ok(times[index] - times[index - 1] >= 5 * 60 * 1000, 'écart minimal de 5 minutes respecté');
-  }
-  // 1 journée ne peut pas tenir plus de 288 clics : le surplus passe le lendemain.
+  const gaps = times.slice(1).map((time, index) => time - times[index]);
+  // La pause est courte : quelques secondes, jamais 5 minutes.
+  assert.ok(Math.max(...gaps) <= utils.DEFAULT_CHAIN_GAP_MS, `pause maximale ${Math.max(...gaps)} ms`);
+  assert.ok(Math.min(...gaps) > 0, 'les clics restent espacés de quelques secondes');
+  // Toute la série tient dans la journée : plus de report au lendemain.
   const perDay = {};
   for (const time of times) {
     const day = Math.floor((time - start) / utils.DAY_MS);
     perDay[day] = (perDay[day] || 0) + 1;
   }
-  assert.equal(perDay[0], 288);
-  assert.equal(perDay[1], 12);
+  assert.deepEqual(Object.keys(perDay), ['0'], `répartition ${JSON.stringify(perDay)}`);
+  assert.equal(perDay[0], 300);
+  // 9000 clics ne sont plus étalés sur 32 jours.
+  const big = utils.buildDailyRunTimes(9000, 1, start, { random });
+  assert.equal(big.length, 9000);
+  assert.ok(big[big.length - 1] - big[0] < utils.DAY_MS, 'les 9000 clics tiennent dans la journée');
+});
+
+test('9000 clics d’un plan réel ne sont plus étalés sur des semaines', () => {
+  // Cas rapporté par l’utilisateur : 2907 + 2893 + 3267 = 9067 clics.
+  const start = Date.parse('2026-11-08T00:00:00Z');
+  const random = () => 0.5;
+  for (const count of [2907, 2893, 3267]) {
+    const times = utils.buildDailyRunTimes(count, 1, start, { random });
+    assert.equal(times.length, count);
+    const spanHours = (times[times.length - 1] - times[0]) / 3_600_000;
+    // À ~2,5 s par clic, ~3000 clics font ~2 h, jamais des semaines.
+    assert.ok(spanHours < 12, `${count} clics étalés sur ${spanHours.toFixed(1)} h`);
+    const fitted = utils.fitVisitsToRate(count, 1);
+    assert.equal(fitted.count, count, `${count} clics ne sont pas ramenés`);
+    assert.equal(fitted.adjusted, false);
+  }
+  // Une pause nulle enchaîne sans aucun temps mort.
+  const instant = utils.buildDailyRunTimes(100, 1, start, { minimumGapMs: 0 });
+  assert.ok(instant.every((time) => time === start));
 });
 
 test('daily planning gives every day at least 100 clicks', () => {

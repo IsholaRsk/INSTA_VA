@@ -10,7 +10,9 @@ const DAILY_JOURNAL_KEY = "dailyClicks";
 const DAILY_JOURNAL_KEEP_DAYS = 40;
 const PROXY_RECOVERY_KEY = "temporaryProxyRecovery";
 const PROXY_AUTH_SESSION_KEY = "temporaryProxyAuth";
-const MIN_SCHEDULE_INTERVAL_MS = 5 * 60 * 1000;
+// Pause entre deux clics d'une même série : courte et variable. Aucun écart
+// imposé, aucun plafond quotidien (directive utilisateur).
+const MIN_SCHEDULE_INTERVAL_MS = 2500;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const VIEWPORT = { width: 1280, height: 800 };
 const REDIRECT_QUIET_MS = 2500;
@@ -30,14 +32,11 @@ const {
   parseTargetDays,
   executionBounds,
   dailyMinimumVisits,
-  dailyVisitQuota,
   buildDailyRunTimes,
   fitVisitsToRate,
-  maxVisitsPerDay,
   dayKey,
   pruneDailyJournal,
   dailyClickTarget,
-  needsMoreToday,
   planVisits,
   nextVisitDelayMs,
   normalizeLinkLabel: normalizeLinkLabelText,
@@ -287,7 +286,7 @@ function renderTargetList() {
     const linkText = target.linkLabel ? `« ${target.linkLabel} »` : "lien principal (libellé vide)";
     const planText = target.mode === "goal"
       ? `${target.executionTarget} visite(s) d’affilée, sans durée`
-      : `visée ${target.executionTarget} · Durée : ${target.durationDays} jour(s) · ≥ ${MIN_VISITS_PER_DAY} clics/jour`;
+      : `${target.executionTarget} visite(s) enchaînées sur ${target.durationDays} jour(s) · ≥ ${MIN_VISITS_PER_DAY} clics/jour`;
     meta.textContent = `${target.url}\nLien à cliquer : ${linkText}\nMode ${modeLabel} : ${planText}`;
     content.append(topLine, meta);
     item.append(checkbox, content);
@@ -403,7 +402,7 @@ function applyTargetModeToForm() {
   targetExecutionCountInput.placeholder = isGoal ? "Ex. 500" : "Ex. 10";
   targetModeHint.textContent = isGoal
     ? "Le bot enchaîne exactement ce nombre de visites en une seule fois, sans durée ni étalement. Avec un libellé, il clique ce lien à chaque visite; sans libellé, il clique le lien principal de la page."
-    : `Le nombre saisi est exécuté à l'identique, réparti sur la durée en jours choisie (1 à ${MAX_TARGET_DURATION_DAYS}), avec au moins ${MIN_VISITS_PER_DAY} clics par jour et 5 minutes minimum entre deux visites. Un nombre trop faible est relevé au minimum quotidien.`;
+    : `Le nombre saisi est exécuté à l'identique sur la durée choisie (1 à ${MAX_TARGET_DURATION_DAYS} jours), clics enchaînés avec une pause courte, sans plafond quotidien. Au moins ${MIN_VISITS_PER_DAY} clics par jour : un nombre trop faible est relevé à ce minimum.`;
 }
 
 function readProxyForm() {
@@ -1151,7 +1150,7 @@ async function startRun() {
         expectedVisits += target.executionTarget;
       } else {
         // Le mode intervalle tient au moins 100 clics/jour sur la durée choisie.
-        expectedVisits += fitVisitsToRate(target.executionTarget, target.durationDays, MIN_SCHEDULE_INTERVAL_MS).count;
+        expectedVisits += fitVisitsToRate(target.executionTarget, target.durationDays).count;
       }
     }
     // Aucun plafond de visites : on informe simplement pour les grosses sélections.
@@ -1241,29 +1240,10 @@ async function startRun() {
       if (dueAt > Date.now()) await waitUntil(dueAt, plan.target.pseudo, runNumber, plan.count);
       if (stopRequested) break;
 
-      // Journal quotidien : garantit au moins 100 clics par jour sur la durée.
-      if (!plan.batch) {
-        const targetForToday = rollPlanToToday(plan, dailyJournal);
-        if (!needsMoreToday({
-          doneToday: plan.doneToday,
-          plannedToday: plan.plannedToday,
-          minimumToday: plan.minimumToday,
-          backlog: plan.backlog,
-        })) {
-          // Objectif du jour atteint : on attend le lendemain pour la suite du plan.
-          const tomorrow = Date.parse(dayKey(Date.now()) + "T00:00:00Z") + DAY_MS;
-          await waitUntil(tomorrow + MIN_SCHEDULE_INTERVAL_MS, plan.target.pseudo, runNumber, plan.count);
-          if (stopRequested) break;
-          continue;
-        }
-        // Recalage de l'horaire si le retard impose des clics supplémentaires.
-        if (plan.doneToday >= plan.plannedToday && plan.nextIndex < plan.count) {
-          const topUpAt = plan.lastRunFinishedAt ? plan.lastRunFinishedAt + MIN_SCHEDULE_INTERVAL_MS : Date.now();
-          if (topUpAt > Date.now()) await waitUntil(topUpAt, plan.target.pseudo, runNumber, plan.count);
-          if (stopRequested) break;
-        }
-        void targetForToday;
-      }
+      // Journal quotidien : il ne sert plus qu'aux statistiques affichées.
+      // Aucun plafond quotidien, aucune pause forcée le soir : la série
+      // enchaîne ses clics d'un bout à l'autre du plan.
+      if (!plan.batch) rollPlanToToday(plan, dailyJournal);
 
       let proxy = null;
       if (proxyPool) {
@@ -1461,7 +1441,7 @@ function createTargetPlan(target, startAt, order) {
   }
 
   const days = parseTargetDays(target.durationDays) || DEFAULT_TARGET_DAYS;
-  const fitted = fitVisitsToRate(target.executionTarget, days, MIN_SCHEDULE_INTERVAL_MS);
+  const fitted = fitVisitsToRate(target.executionTarget, days);
   return {
     target: { ...target, mode },
     count: fitted.count,
@@ -1479,8 +1459,6 @@ function createTargetPlan(target, startAt, order) {
     // Rythme minimum garanti : au moins 100 clics par jour sur la durée.
     plannedToday: Math.max(fitted.count / days, MIN_VISITS_PER_DAY),
     minimumToday: MIN_VISITS_PER_DAY,
-    dayQuota: dailyVisitQuota(fitted.count, days),
-    quotaEnd: dailyVisitQuota(fitted.count, days)[0] || 0,
     dayIndex: 0,
     todayKey: dayKey(startAt),
     doneToday: 0,
@@ -1498,12 +1476,9 @@ function getNextDueAt(plan) {
     return plan.lastRunFinishedAt + plan.nextDelayMs;
   }
   const plannedTime = plan.runTimes[Math.min(plan.nextIndex, plan.runTimes.length - 1)];
+  // Un clic ne peut pas partir avant le précédent + la pause courte, ni avant
+  // son créneau. Plus de quota quotidien qui retiendrait la série.
   const earliest = plan.nextIndex === 0 ? plannedTime : plan.lastRunFinishedAt + MIN_SCHEDULE_INTERVAL_MS;
-  // Tant que le quota du jour n'est pas atteint, on reste dans la journée visée.
-  if (plan.nextIndex < plan.quotaEnd) {
-    const milestone = plan.runTimes[plan.quotaEnd];
-    return Math.min(Math.max(plannedTime, earliest), milestone);
-  }
   return Math.max(plannedTime, earliest);
 }
 
@@ -1548,8 +1523,9 @@ async function saveDailyJournal(journal) {
 }
 
 /**
- * Passe le plan à la journée courante : avance les quotas et calcule le retard
- * (jours précédents sous 100 clics). Retourne l'objectif de clics du jour.
+ * Passe le plan à la journée courante pour les statistiques affichées.
+ * Ne retient plus rien : plus de quota journalier, donc plus de clic mis en
+ * attente au passage d'une journée.
  */
 function rollPlanToToday(plan, journal, now = Date.now()) {
   const today = dayKey(now);
@@ -1568,14 +1544,7 @@ function rollPlanToToday(plan, journal, now = Date.now()) {
     plan.doneToday = 0;
     guard += 1;
   }
-  // Quota cumulé jusqu'à la journée courante (le plan ne dépasse pas sa durée).
-  const cumulative = plan.dayQuota.slice(0, Math.min(plan.dayIndex + 1, plan.dayQuota.length))
-    .reduce((sum, value) => sum + value, 0);
-  plan.quotaEnd = Math.min(cumulative, plan.count);
-  // Retard : jours écoulés sous le minimum de 100 clics.
-  const elapsed = Math.min(plan.dayIndex + 1, plan.days);
-  const expected = plan.minimumToday * elapsed;
-  plan.backlog = Math.max(0, expected - cumulative);
+  plan.backlog = 0;
   plan.doneToday = todayDone;
   return dailyClickTarget({
     doneToday: todayDone,

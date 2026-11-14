@@ -8,13 +8,14 @@ import {
   validateUuid,
 } from '../lib/shared.js';
 
-test('schedule starts immediately and keeps every target interval at least five minutes', () => {
+test('schedule starts immediately, chains clicks and fits the chosen duration', () => {
   const start = 1_800_000_000_000;
   const times = buildRandomRunTimes(60, 1, start);
   assert.equal(times.length, 60);
   assert.equal(times[0], start);
+  // Plus d'écart imposé : les clics restent ordonnés et rapprochés.
   for (let index = 1; index < times.length; index += 1) {
-    assert.ok(times[index] - times[index - 1] >= 5 * 60 * 1000);
+    assert.ok(times[index] > times[index - 1], 'horaires croissants');
   }
   assert.ok(times.at(-1) < start + 7 * 24 * 60 * 60 * 1000);
 });

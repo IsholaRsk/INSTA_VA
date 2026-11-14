@@ -42,11 +42,10 @@ export function planTarget({ mode, executionTarget, durationDays }) {
     dailyMinimum: Math.min(MIN_CLICKS_PER_DAY, fitted.count),
     dailyQuota: quota,
     adjusted: fitted.adjusted,
+    // Plus de plafond quotidien : un total élevé n'est plus jamais ramené.
     reason: fitted.count > fitted.requested
       ? `Relevé à ${fitted.count} clics pour tenir au moins ${MIN_CLICKS_PER_DAY} clics par jour sur ${formatDays(days)}.`
-      : fitted.count < fitted.requested
-        ? `Ramencé à ${fitted.count} clics : ${fitted.maximum} clics par jour au maximum avec 5 minutes d’écart.`
-        : '',
+      : '',
   };
 }
 
@@ -78,8 +77,8 @@ export function validateTargetInput(body) {
     mode,
     execution_target: executionTarget,
     duration_days: plan.durationDays,
-    // Le total réellement exécuté tient compte du minimum de 100 clics/jour
-    // et du plafond de 288 clics/jour imposé par l'écart de 5 minutes.
+    // Le total réellement exécuté ne tient compte que du minimum de
+    // 100 clics/jour : il n'y a plus de plafond quotidien.
     effective_total: plan.effectiveTotal,
     daily_minimum: plan.dailyMinimum,
   };
@@ -98,7 +97,7 @@ export function describePlan(target) {
   }
   const parts = [`${days} jour(s)`, `${total} clics au total`];
   if (total > requested) parts.push(`relevé depuis ${requested} pour tenir le minimum quotidien`);
-  if (total < requested) parts.push(`ramené depuis ${requested} (maximum ${utils.maxVisitsPerDay()} par jour)`);
   if (minimum) parts.push(`au moins ${minimum} clics/jour`);
+  parts.push('clics enchaînés, sans plafond quotidien');
   return `Intervalle : ${parts.join(' · ')}.`;
 }
