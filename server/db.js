@@ -13,7 +13,7 @@ import path from 'node:path';
  *
  * La v2 remplace le proxy unique par une liste illimitée avec rotation.
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 const MIGRATION_V1 = `
 CREATE TABLE IF NOT EXISTS users (
@@ -150,6 +150,28 @@ CREATE TABLE IF NOT EXISTS proxy_state (
 `;
 
 /**
+ * v4 : usage réel de chaque proxy, pour que toute la liste serve.
+ *
+ * Un fournisseur résidentiel ne vend souvent qu'une passerelle : avec
+ * plusieurs entrées, l'ancien tirage uniforme resservait la même et laissait
+ * les autres inutilisées. On compte donc les cycles servis par passerelle
+ * (host+protocole, le port ne distingue pas deux IP résidentielles) et la
+ * rotation écarte d'abord celles déjà servies dans la passe courante.
+ *  - proxies.usage_key : clé de comparaison (scheme://host)
+ *  - proxies.last_session : identifiant de session figée utilisé au dernier cycle
+ *  - proxy_state.passes : numéro de passe en cours, jamais remis à zéro
+ */
+const MIGRATION_V4 = `
+CREATE TABLE IF NOT EXISTS proxy_usage (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  usage_key TEXT NOT NULL,
+  cycles INTEGER NOT NULL DEFAULT 0,
+  last_used_at TEXT,
+  PRIMARY KEY (user_id, usage_key)
+);
+`;
+
+/**
  * v3 : deux apports pour survivre aux contrôles de Cloudflare.
  *  - proxies.ip_kind / asn / org : nature de l'IP de sortie, pour choisir un
  *    proxy selon son réseau et non selon sa position dans la liste.
@@ -241,6 +263,33 @@ export function openDatabase(file, { log = () => {} } = {}) {
         cookie_count INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL
       );`);
+      db.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
+        .run(String(SCHEMA_VERSION));
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+  if (current < 4) {
+    if (current >= 1) log('Migration v4 : usage de chaque proxy et sessions figées');
+    db.exec('BEGIN');
+    try {
+      db.exec(MIGRATION_V4);
+      for (const [column, type] of [['usage_key', 'TEXT'], ['last_session', 'TEXT']]) {
+        if (!columnExists(db, 'proxies', column)) db.exec(`ALTER TABLE proxies ADD COLUMN ${column} ${type}`);
+      }
+      if (!columnExists(db, 'proxy_state', 'passes')) {
+        db.exec('ALTER TABLE proxy_state ADD COLUMN passes INTEGER NOT NULL DEFAULT 0');
+      }
+      // Reprise de l'existant : la clé d'usage dérive du protocole et de l'hôte,
+      // que lower() et replace() suffisent à normaliser.
+      db.exec(`UPDATE proxies SET usage_key = lower(coalesce(scheme, 'http')) || '://' || lower(host)
+        WHERE usage_key IS NULL OR usage_key = ''`);
+      db.exec(`INSERT INTO proxy_usage (user_id, usage_key, cycles, last_used_at)
+        SELECT user_id, usage_key, coalesce(cycles, 0), last_used_at FROM proxies
+        WHERE usage_key IS NOT NULL AND usage_key <> ''
+        ON CONFLICT (user_id, usage_key) DO NOTHING`);
       db.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
         .run(String(SCHEMA_VERSION));
       db.exec('COMMIT');

@@ -62,6 +62,8 @@ export function publicProxy(row) {
     ip_checked_at: row.ip_checked_at || null,
     last_error: row.last_error || null,
     last_used_at: row.last_used_at || null,
+    usage_key: row.usage_key || '',
+    last_session: row.last_session || null,
     created_at: row.created_at,
   };
 }
@@ -383,13 +385,19 @@ export function createStore(db) {
 
     insertProxies(userId, rows) {
       const insert = stmt(`INSERT INTO proxies (id, user_id, label, scheme, host, port,
-              username_masked, secret_box, created_at)
+              username_masked, secret_box, created_at, usage_key)
             VALUES (:id, :user_id, :label, :scheme, :host, :port,
-              :username_masked, :secret_box, :created_at)`);
+              :username_masked, :secret_box, :created_at, :usage_key)`);
       const now = ISO();
       db.exec('BEGIN');
       try {
-        for (const row of rows) insert.run({ user_id: userId, created_at: now, label: '', ...row });
+        for (const row of rows) {
+          // Clé d'usage : le protocole et l'hôte, pas le port. Chez un
+          // fournisseur résidentiel, deux ports du même hôte sortent par des
+          // IP différentes, mais une seule passerelle suffit à tourner.
+          const usageKey = `${String(row.scheme || 'http').toLowerCase()}://${String(row.host || '').toLowerCase()}`;
+          insert.run({ user_id: userId, created_at: now, label: '', ...row, usage_key: usageKey });
+        }
         db.exec('COMMIT');
       } catch (error) {
         db.exec('ROLLBACK');
@@ -437,20 +445,21 @@ export function createStore(db) {
           cursor: Number(row.cursor || 0),
           disableAfter: Number(row.disable_after || 3),
           lastProxyId: row.last_proxy_id || null,
+          passes: Number(row.passes || 0),
         };
       }
-      return { enabled: false, rotation: 'order', cursor: 0, disableAfter: 3, lastProxyId: null };
+      return { enabled: false, rotation: 'order', cursor: 0, disableAfter: 3, lastProxyId: null, passes: 0 };
     },
 
     saveProxyState(userId, patch) {
       const current = this.getProxyState(userId);
       const next = { ...current, ...patch };
-      stmt(`INSERT INTO proxy_state (user_id, enabled, rotation, cursor, disable_after, last_proxy_id, updated_at)
-            VALUES (:user_id, :enabled, :rotation, :cursor, :disable_after, :last_proxy_id, :updated_at)
+      stmt(`INSERT INTO proxy_state (user_id, enabled, rotation, cursor, disable_after, last_proxy_id, passes, updated_at)
+            VALUES (:user_id, :enabled, :rotation, :cursor, :disable_after, :last_proxy_id, :passes, :updated_at)
             ON CONFLICT (user_id) DO UPDATE SET
               enabled = excluded.enabled, rotation = excluded.rotation, cursor = excluded.cursor,
               disable_after = excluded.disable_after, last_proxy_id = excluded.last_proxy_id,
-              updated_at = excluded.updated_at`)
+              passes = excluded.passes, updated_at = excluded.updated_at`)
         .run({
           user_id: userId,
           enabled: next.enabled ? 1 : 0,
@@ -458,6 +467,7 @@ export function createStore(db) {
           cursor: Math.max(0, Math.floor(Number(next.cursor) || 0)),
           last_proxy_id: next.lastProxyId ? String(next.lastProxyId) : null,
           disable_after: Math.min(20, Math.max(1, Math.floor(Number(next.disableAfter) || 3))),
+          passes: Math.max(0, Math.floor(Number(next.passes) || 0)),
           updated_at: ISO(),
         });
       return this.getProxyState(userId);
@@ -499,6 +509,36 @@ export function createStore(db) {
     listTargetSessions(userId) {
       return stmt('SELECT target_id, cookie_count, updated_at FROM target_sessions WHERE user_id = ?').all(userId)
         .map((row) => ({ targetId: row.target_id, cookieCount: Number(row.cookie_count || 0), updatedAt: row.updated_at }));
+    },
+
+    /** Cycles servis, par passerelle (scheme://host), pour la rotation équitable. */
+    getProxyUsage(userId) {
+      const rows = stmt('SELECT usage_key, cycles FROM proxy_usage WHERE user_id = ?').all(userId);
+      return Object.fromEntries(rows.map((row) => [row.usage_key, Number(row.cycles || 0)]));
+    },
+
+    /**
+     * Enregistre l'usage d'une passerelle. Séparé de `recordProxyOutcome` :
+     * l'usage décrit ce qui a été *tenté*, pas ce qui a réussi. Un cycle
+     * bloqué par le site a bien consommé cette passerelle.
+     */
+    recordProxyUsage(userId, usageKey) {
+      const key = String(usageKey || '').trim();
+      if (!key) return null;
+      const now = ISO();
+      stmt(`INSERT INTO proxy_usage (user_id, usage_key, cycles, last_used_at)
+            VALUES (:user_id, :usage_key, 1, :now)
+            ON CONFLICT (user_id, usage_key) DO UPDATE SET
+              cycles = cycles + 1, last_used_at = :now`)
+        .run({ user_id: userId, usage_key: key, now });
+      return this.getProxyUsage(userId)[key] || 0;
+    },
+
+    /** Mémorise la session figée utilisée au dernier cycle sur ce proxy. */
+    setProxySession(proxyId, sessionId) {
+      if (!proxyId) return;
+      stmt('UPDATE proxies SET last_session = :session WHERE id = :id')
+        .run({ id: proxyId, session: sessionId ? String(sessionId).slice(0, 64) : null });
     },
 
     recordProxyOutcome(proxyId, { success, error = null, disableAfter = 3 }) {

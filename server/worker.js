@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { dayKeyIn } from './time.js';
 import { ChallengeError } from './browser.js';
+import { randomSessionId } from './proxies.js';
+import '../extension/bot-utils.js';
+
+// Mêmes règles de session que l'extension et l'API : une seule définition.
+const utils = globalThis.InstaVAUtils;
 
 const LAUNCH_ERROR_RE = /Executable doesn\u2019t exist|Executable doesn't exist|Failed to launch|browserType\.launch/i;
 
@@ -145,12 +150,28 @@ export function createWorker({
     }
 
     // Proxy du cycle : rotation sur la liste activée (aucun si désactivée).
+    // `baseProxy` garde les identifiants sans session : chaque nouvelle
+    // tentative repart d'une IP fraîche de la même passerelle, plutôt que de
+    // consommer une autre entrée de la liste pour la même visite.
     let proxy = null;
     let proxyId = null;
+    let baseProxy = null;
+    let session = null;
     try {
       const picked = decryptProxy(visit.user_id);
-      if (picked && picked.proxy) { proxy = picked.proxy; proxyId = picked.id; }
+      if (picked && picked.proxy) {
+        proxy = picked.proxy;
+        proxyId = picked.id;
+        baseProxy = picked.baseProxy || picked.proxy;
+        session = picked.session || null;
+      }
     } catch (error) { logger.warn(`Proxy ignoré pour ${target.pseudo} : ${error.message}`); }
+
+    // Une session figée par exécution : c'est ce qui garantit que la visite
+    // entière sort par une seule IP au lieu d'en changer à chaque requête.
+    if (session?.specialized) {
+      logger.info(`⏸ ${target.pseudo} — ${session.reason}.`);
+    }
 
     // Cookies de la visite précédente sur cette cible : on revient comme un
     // visiteur déjà venu, pas comme un nouveau à chaque fois (règle 5).
@@ -183,9 +204,10 @@ export function createWorker({
 
       for (let index = 0; index < maxAttempts; index += 1) {
         if (index > 0) {
-          // Nouvelle IP : on écarte celles déjà essayées sur cette visite.
-          // Si la liste est épuisée, on reprend le même proxy plutôt que
-          // d'abandonner : la tentative doit avoir lieu.
+          // Nouvelle tentative = nouvelle IP. On change d'abord de passerelle
+          // (c'est la seule façon d'avoir une IP réellement différente), puis
+          // on demande une session neuve pour que la tentative entière reste
+          // sur cette IP au lieu d'en changer à chaque requête.
           let next = null;
           try {
             for (let draw = 0; draw < 8 && !next; draw += 1) {
@@ -197,8 +219,18 @@ export function createWorker({
           if (next?.proxy) {
             proxy = next.proxy;
             proxyId = next.id;
+            baseProxy = next.baseProxy || next.proxy;
+            session = next.session || null;
             triedProxies.add(proxyId);
-            logger.info(`↻ ${target.pseudo} — tentative ${index + 1}/${maxAttempts} via ${proxy.host}:${proxy.port}.`);
+            logger.info(`↻ ${target.pseudo} — tentative ${index + 1}/${maxAttempts} via ${proxy.host}:${proxy.port}${session?.id ? ` (session ${session.id})` : ''}.`);
+          } else if (baseProxy) {
+            // Liste épuisée : on garde la même passerelle mais on renouvelle la
+            // session, ce qui rend une autre adresse du même fournisseur.
+            const refreshed = utils.buildProxySession(baseProxy, `r${index}${randomSessionId()}`, { durationMinutes: 5 });
+            proxy = refreshed.proxy;
+            session = { id: refreshed.sessionId, specialized: refreshed.specialized, reason: refreshed.reason };
+            store.setProxySession?.(proxyId, refreshed.sessionId);
+            logger.info(`↻ ${target.pseudo} — tentative ${index + 1}/${maxAttempts} via ${proxy.host}:${proxy.port}, IP renouvelée (session ${refreshed.sessionId}).`);
           }
         }
 

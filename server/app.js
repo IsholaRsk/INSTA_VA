@@ -29,6 +29,11 @@ import { dayKeyIn } from './time.js';
 import { createWorker } from './worker.js';
 import { contextProfile, engineVersionFrom, fingerprintFromProfile } from './stealth.js';
 import { readFileSync } from 'node:fs';
+import '../extension/bot-utils.js';
+
+// Détection de passerelle rotationnelle et clé d'usage : une seule définition,
+// partagée avec l'extension et le worker.
+const utils = globalThis.InstaVAUtils;
 
 // Limites par défaut ; injectables pour les tests et les déploiements partagés.
 export const LIMITS = {
@@ -294,13 +299,32 @@ export function createApp({
   route('GET', '/api/proxies', (req, res, user) => {
     const proxies = store.listProxies(user.id);
     const state = store.getProxyState(user.id);
+    const usage = store.getProxyUsage(user.id);
+    // La question à laquelle l'écran doit répondre : « est-ce que toute ma
+    // liste sert vraiment ? ». On expose donc le nombre de cycles par
+    // passerelle, et une entrée jamais servie reste visible à 0.
+    const rotation = proxies.map((proxy) => ({
+      id: proxy.id,
+      usage_key: proxy.usage_key || '',
+      cycles: usage[proxy.usage_key] ?? 0,
+      gateway: Boolean(utils.isRotatingGateway(proxy)),
+      session: proxy.last_session || null,
+    }));
+    const served = rotation.filter((entry) => entry.cycles > 0).length;
     sendJson(res, 200, {
       proxies,
       state,
+      rotation,
       totals: {
         count: proxies.length,
         enabled: proxies.filter((proxy) => proxy.enabled).length,
         cycles: proxies.reduce((sum, proxy) => sum + proxy.cycles, 0),
+        // Passerelles distinctes servies : le chiffre qui prouve que la
+        // rotation ne tourne pas toujours sur la même entrée.
+        gateways: new Set(proxies.map((proxy) => proxy.usage_key).filter(Boolean)).size,
+        served,
+        never_used: proxies.filter((proxy) => proxy.enabled && !(usage[proxy.usage_key] > 0)).length,
+        passes: Number(state.passes || 0),
       },
     });
   });
@@ -468,6 +492,26 @@ export function createApp({
         priority: (byKind.residential || 0) > 0,
       },
       sessions: store.listTargetSessions(user.id).length,
+      rotation: (() => {
+        const usage = store.getProxyUsage(user.id);
+        const state = store.getProxyState(user.id);
+        const keys = new Set(proxies.filter((proxy) => proxy.enabled).map((proxy) => proxy.usage_key).filter(Boolean));
+        const served = [...keys].filter((key) => usage[key] > 0).length;
+        const gateways = proxies.filter((proxy) => proxy.enabled && utils.isRotatingGateway(proxy)).length;
+        return {
+          gateways: keys.size,
+          served,
+          never_used: keys.size - served,
+          passes: Number(state.passes || 0),
+          rotating_gateways: gateways,
+          sticky_per_execution: gateways > 0,
+          summary: keys.size === 0
+            ? 'Aucun proxy actif : le bot sortira par l’IP du VPS.'
+            : gateways > 0
+              ? `${served}/${keys.size} passerelle(s) déjà servie(s). Chaque exécution demande une IP figée (session courte) : une visite = une adresse.`
+              : `${served}/${keys.size} proxy(s) déjà servi(s). Adresses fixes : une visite = une adresse, sans session à créer.`,
+        };
+      })(),
       rules: {
         ip: (byKind.residential || 0) > 0
           ? 'Au moins un proxy résidentiel connu : il passe en priorité.'

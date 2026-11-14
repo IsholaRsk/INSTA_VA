@@ -569,6 +569,9 @@ let proxyRecords = [];
 let proxyTestResults = new Map();
 let proxyState = null;
 let proxyTesting = false;
+// Cycles réellement servis par passerelle (clé scheme://host) : c'est le
+// chiffre qui montre si toute la liste tourne, ou si une entrée prend tout.
+let proxyUsage = new Map();
 
 function formatRelative(value) {
   if (!value) return 'jamais utilisé';
@@ -606,8 +609,13 @@ function renderProxies() {
 
   const cycles = proxyRecords.reduce((sum, proxy) => sum + proxy.cycles, 0);
   const order = proxyState?.rotation === 'random' ? 'au hasard' : 'dans l’ordre';
+  // Passerelles distinctes servies : deux ports du même hôte comptent une fois.
+  const keys = [...new Set(proxyRecords.map((proxy) => proxy.usage_key).filter(Boolean))];
+  const served = keys.filter((key) => (proxyUsage.get(key)?.cycles || 0) > 0).length;
   $('#proxy-summary').textContent = proxyRecords.length
-    ? `${proxyRecords.length} proxy(s) · ${cycles} cycle(s) effectué(s) · rotation ${order}${proxyState?.rotation === 'order' && proxyRecords.length ? ` · prochain : n°${(Number(proxyState.cursor || 0) % proxyRecords.length) + 1}` : ''}`
+    ? `${proxyRecords.length} proxy(s) · ${cycles} cycle(s) effectué(s) · rotation ${order}`
+      + (keys.length ? ` · ${served}/${keys.length} passerelle(s) servie(s)` : '')
+      + (proxyState?.rotation === 'order' && proxyRecords.length ? ` · prochain : n°${(Number(proxyState.cursor || 0) % proxyRecords.length) + 1}` : '')
     : 'Aucun proxy importé. Le bot sortira par l’IP du VPS.';
   $('#proxy-enabled').checked = Boolean(proxyState?.enabled);
   $('#proxy-rotation').value = proxyState?.rotation === 'random' ? 'random' : 'order';
@@ -639,6 +647,13 @@ function renderProxies() {
     else if (proxy.consecutive_failures) tags.append(node('span', 'proxy-tag is-warn', `${proxy.consecutive_failures} échec(s) de suite`));
     const rate = proxyPercent(proxy);
     if (rate !== null) tags.append(node('span', 'proxy-tag', `${rate}% de réussite · ${proxy.cycles} cycle(s)`));
+    // Cycles servis par cette passerelle, et IP figée du dernier cycle.
+    const usageEntry = proxyUsage.get(proxy.usage_key);
+    if (usageEntry) {
+      tags.append(node('span', `proxy-tag ${usageEntry.cycles > 0 ? 'is-good' : 'is-muted'}`, `${usageEntry.cycles} cycle(s) sur cette passerelle`));
+      if (usageEntry.gateway) tags.append(node('span', 'proxy-tag is-muted', 'IP tournante'));
+      if (usageEntry.session) tags.append(node('span', 'proxy-tag is-muted', `session ${usageEntry.session}`));
+    }
     // Nature de l'IP de sortie, connue après le bouton Tester.
     const tested = proxyTestResults.get(proxy.id);
     if (tested?.ok && tested.ipKind) {
@@ -713,6 +728,7 @@ async function loadProxyStatus() {
     const data = await apiRequest('/api/proxies');
     proxyRecords = data.proxies || [];
     proxyState = data.state || null;
+    proxyUsage = new Map((data.rotation || []).map((entry) => [entry.usage_key, entry]));
     renderProxies();
   } catch (error) {
     setFormMessage($('#proxy-message'), displayError(error), 'error');

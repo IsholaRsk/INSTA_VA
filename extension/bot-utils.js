@@ -91,7 +91,9 @@
     var source = raw && typeof raw === "object" ? raw : {};
     var scheme = normalizeScheme(source.scheme || "http");
     var host = normalizeHost(source.host);
-    var port = Number(source.port);
+    // null = port non fourni (défaut du protocole) ; 0 = port explicitement nul (refusé).
+    var rawPort = source.port;
+    var port = rawPort === null || rawPort === undefined || rawPort === "" ? null : Number(rawPort);
     var username = String(source.username == null ? "" : source.username);
     var password = String(source.password == null ? "" : source.password);
 
@@ -100,12 +102,104 @@
     if (host.indexOf(":") >= 0) return { ok: false, message: "Les adresses IPv6 ne sont pas prises en charge; utilisez l’hôte fourni par Webshare." };
     if (!HOSTNAME_RE.test(host) && !IPV4_RE.test(host)) return { ok: false, message: "Hôte de proxy invalide (sans protocole, chemin ni espace)." };
     if (isBlockedHost(host)) return { ok: false, message: "Hôte local ou privé refusé pour un proxy." };
+    // Port omis (null) : on applique le port par défaut documenté du protocole
+    // plutôt que de rejeter la ligne — un proxy collé reste une entrée. Un
+    // port 0 écrit explicitement reste une faute de saisie et est refusé.
+    if (port === null) port = DEFAULT_PROXY_PORTS[scheme] || 8000;
     if (!Number.isInteger(port) || port < 1 || port > 65535) return { ok: false, message: "Port du proxy invalide (1 à 65535)." };
     if (!username.trim()) return { ok: false, message: "Nom d’utilisateur du proxy manquant." };
     if (username.length > 512 || password.length > 512) return { ok: false, message: "Identifiants du proxy trop longs (512 caractères maximum)." };
     if (!password) return { ok: false, message: "Mot de passe du proxy manquant." };
 
     return { ok: true, value: { scheme: scheme, host: host, port: port, username: username, password: password } };
+  }
+
+  // Ports par défaut documentés : 8000 chez Rayobyte/Webshare pour HTTP,
+  // 1080 pour SOCKS5. Un port absent ne doit pas faire perdre la ligne.
+  var DEFAULT_PROXY_PORTS = { "http": 8000, "https": 8000, "socks5": 1080 };
+
+  /**
+   * Une passerelle rotationnelle est un point d'entrée unique qui sort par une
+   * IP différente à chaque connexion. On la reconnaît à deux signes :
+   *  - son nom contient « residential », « rotating » ou « gateway » ;
+   *  - le même hôte propose beaucoup de ports, ou le compte n'a qu'une entrée.
+   * Sert uniquement à expliquer l'interface, jamais à filtrer.
+   */
+  function isRotatingGateway(proxy) {
+    if (!proxy) return false;
+    var haystack = [proxy.host, proxy.name].map(function (value) {
+      return String(value == null ? "" : value).toLowerCase();
+    }).join(" ");
+    return /(residential|rotating|backconnect|gateway|\.gw\.|spin|proxy-pool)/.test(haystack);
+  }
+
+  /**
+   * Paramètres de ciblage/session déjà présents dans le mot de passe (ex.
+   * « motdepasse-country-US-session-abc-duration-10 »). On les conserve : un
+   * mot de passe n'est jamais réécrit à l'aveugle.
+   */
+  function hasStickySession(password) {
+    return /(-session-|-hardsession-)/i.test(String(password == null ? "" : password));
+  }
+
+  function hasCountryTargeting(password) {
+    return /-country-/i.test(String(password == null ? "" : password));
+  }
+
+  /**
+   * Construit les identifiants à utiliser pour UNE exécution.
+   *
+   * Le problème réel : la passerelle résidentielle change d'IP à chaque
+   * connexion, donc une seule visite peut sortir par plusieurs adresses et
+   * l'IP annoncée n'est jamais celle qui a cliqué. Avec un identifiant de
+   * session, le fournisseur fige une IP pour la durée de la visite
+   * (Rayobyte : `-session-<id>` et `-duration-<minutes>` ajoutés au mot de passe).
+   *
+   * Le mot de passe existant est conservé tel quel : les options de ciblage ou
+   * une session déjà choisies par l'utilisateur priment toujours.
+   */
+  function buildProxySession(proxy, sessionId, options) {
+    if (!proxy) return null;
+    var settings = options || {};
+    var password = String(proxy.password == null ? "" : proxy.password);
+    if (hasStickySession(password)) {
+      return { proxy: proxy, sessionId: "", specialized: false, reason: "session déjà fixée dans le mot de passe" };
+    }
+    if (!isRotatingGateway(proxy)) {
+      return { proxy: proxy, sessionId: "", specialized: false, reason: "adresse fixe, aucune session à créer" };
+    }
+    var id = String(sessionId == null ? "" : sessionId).replace(/[^a-zA-Z0-9]/g, "").slice(0, 16);
+    if (!id) return { proxy: proxy, sessionId: "", specialized: false, reason: "identifiant de session vide" };
+    // Durée : assez pour couvrir l'ouverture, le clic et la redirection.
+    // Durée : assez pour couvrir l'ouverture, le clic et la redirection. Une
+    // valeur absente vaut 5 minutes ; une valeur fournie est bornée, pas
+    // remplacée (0 minute doit valoir 1, pas 5).
+    var asked = settings.durationMinutes;
+    var minutes = asked === null || asked === undefined || asked === ""
+      ? 5
+      : Math.min(60, Math.max(1, Math.floor(Number(asked) || 1)));
+    var suffix = "-session-" + id + "-duration-" + minutes;
+    return {
+      proxy: {
+        id: proxy.id,
+        scheme: proxy.scheme,
+        host: proxy.host,
+        port: proxy.port,
+        name: proxy.name,
+        username: proxy.username,
+        password: password + suffix,
+      },
+      sessionId: id,
+      specialized: true,
+      reason: "IP figée pour l’exécution (session " + id + ", " + minutes + " min)",
+    };
+  }
+
+  /** Clé d'usage : une passerelle compte une fois, quel que soit son port. */
+  function proxyUsageKey(proxy) {
+    if (!proxy) return "";
+    return ((normalizeScheme(proxy.scheme || "http") || "http") + "://" +
+      normalizeHost(proxy.host)).toLowerCase();
   }
 
   function proxySignature(proxy) {
@@ -162,6 +256,11 @@
       rest = rest.replace(/\t+/g, ":");
     }
 
+    // Tabulations et espaces servent souvent de séparateur quand on colle
+    // depuis un portail : host:port:user:pass avec des tabulations reste
+    // une seule entrée, on les ramène au séparateur canonique.
+    if (/\s/.test(rest)) rest = rest.replace(/[\t ]+/g, ":").replace(/::+/g, ":");
+
     var scheme = "";
     var schemeMatch = rest.match(/^(https?|socks5h?):\/\//i);
     if (schemeMatch) {
@@ -186,15 +285,20 @@
       var afterAt = rest.slice(atIndex + 1);
       var beforeParts = beforeAt.split(":");
       var afterParts = afterAt.split(":");
-      // Dans user:pass@host:port, la partie après @ est host:port (ou [ipv6]:port).
-      // Dans host:port:email@domaine:pass (format Rayobyte par défaut avec e-mail)
-      // ou host:port:user:mot@passe, la ligne débute déjà par host:port:…
-      var afterIsEndpoint = afterAt.indexOf("[") >= 0 ||
-        (afterParts.length >= 2 && isHostToken(afterParts[0]) && isValidPortToken(afterParts[1]));
+      // Deux écritures coexistent : `user:pass@hôte:port` (l'endpoint est après
+      // le @) et `hôte:port:user:pass` où un @ peut apparaître dans le mot de
+      // passe ou l'e-mail. Une ligne `hôte:port:utilisateur:motdepasse@…` commence déjà par son
+      // endpoint : ce qui suit le @ appartient au mot de passe et ne doit pas
+      // être relu comme un second endpoint (sinon « mot@passe » est coupé).
       var beforeStartsWithHostPort = beforeParts.length >= 3 &&
         isHostToken(beforeParts[0]) &&
         isValidPortToken(beforeParts[1]) &&
         beforeParts[0].indexOf(".") >= 0;
+      // Ce qui suit le @ est l'endpoint : hôte + port, ou hôte seul quand la
+      // ligne commence par les identifiants (`user:pass@hôte`).
+      var afterIsEndpoint = afterAt.indexOf("[") >= 0 ||
+        (afterParts.length >= 2 && isHostToken(afterParts[0]) && isValidPortToken(afterParts[1])) ||
+        (afterParts.length === 1 && isHostToken(afterParts[0]) && !beforeStartsWithHostPort);
       var emailInHostPortUserPass = beforeStartsWithHostPort && beforeParts.length === 3 && afterParts.length === 2;
 
       if (afterIsEndpoint && !emailInHostPortUserPass) {
@@ -217,12 +321,21 @@
     }
 
     var parts = rest.split(":");
-    if (parts.length < 2) return { ok: false, message: "Format attendu : host:port:user:pass." };
+    if (parts.length < 2) {
+      // « host » seul (avec ou sans identifiants) : le port est facultatif
+      // quand le fournisseur le fixe (8000 chez Rayobyte, 1080 en SOCKS5).
+      // Le défaut est posé par validateProxyEntry selon le protocole.
+      if (/^[a-z0-9.-]+$/i.test(rest) && rest.indexOf(".") > 0) {
+        parts = [rest];
+      } else {
+        return { ok: false, message: "Format attendu : host:port:user:pass." };
+      }
+    }
     if (parts.length === 3) return { ok: false, message: "Format incomplet : host:port:user:pass ou user:pass@host:port." };
     if (parts.length > 4 && hasUserInfo) return { ok: false, message: "Deux jeux d’identifiants dans la même ligne." };
 
     var host = parts[0];
-    var port = parts[1];
+    var port = parts.length >= 2 ? parts[1] : null;
     if (parts.length >= 4) {
       if (hasUserInfo) return { ok: false, message: "Deux jeux d’identifiants dans la même ligne." };
       username = parts[2];
@@ -331,18 +444,53 @@
       list = residential.concat(untested);
     }
 
-    var cursor = Number.isInteger(settings.cursor) ? settings.cursor : 0;
-    var index;
-    if (settings.mode === "random") {
-      var source = typeof random === "function" ? random : Math.random;
-      var value = Number(source());
-      if (!Number.isFinite(value)) value = 0;
-      index = Math.min(list.length - 1, Math.max(0, Math.floor(value * list.length)));
-    } else {
-      index = ((cursor % list.length) + list.length) % list.length;
+    // Une visite ne doit jamais partir deux fois de suite de la même IP :
+    // la passerelle du cycle précédent est écartée tant qu'il en reste une
+    // autre. Sans cette règle, la passe suivante pouvait la reprendre.
+    var lastKey = String(settings.lastUsageKey || "");
+    if (lastKey) {
+      var withoutLast = list.filter(function (proxy) { return proxyUsageKey(proxy) !== lastKey; });
+      if (withoutLast.length) list = withoutLast;
     }
 
-    return { proxy: list[index], cursor: (index + 1) % list.length, index: index };
+    // Tirage équitable : on écarte ensuite les entrées déjà servies dans la
+    // passe courante, puis on tire au hasard dedans. L'ancien tirage uniforme
+    // sur toute la liste favorisait la même entrée (mesuré : 11 fois sur 12)
+    // et laissait les autres inutilisées.
+    var usage = settings.usage || {};
+    var passes = Number.isInteger(settings.passes) && settings.passes >= 0 ? settings.passes : 0;
+    var remaining = list.filter(function (proxy) {
+      return (Number(usage[proxyUsageKey(proxy)]) || 0) <= passes;
+    });
+    // Toutes servies dans cette passe : la suivante commence, tout redevient
+    // éligible. Le compteur n'est jamais remis à zéro, il sert de référence.
+    if (!remaining.length) {
+      remaining = list;
+      passes += 1;
+    }
+
+    var source = typeof random === "function" ? random : Math.random;
+    var value = Number(source());
+    if (!Number.isFinite(value)) value = 0;
+    value = Math.min(0.999999999, Math.max(0, value));
+    var index = Math.floor(value * remaining.length);
+    var picked = remaining[index];
+
+    var cursor = Number.isInteger(settings.cursor) ? settings.cursor : 0;
+    if (settings.mode !== "random") {
+      // Mode ordre : parcours séquentiel, mais parmi les entrées non servies.
+      var position = cursor % remaining.length;
+      picked = remaining[position];
+      cursor = (position + 1) % remaining.length;
+    }
+
+    return {
+      proxy: picked,
+      cursor: cursor,
+      index: list.indexOf(picked),
+      usageKey: proxyUsageKey(picked),
+      passes: passes,
+    };
   }
 
   // ───────────────────────── Cibles : modes et libellé facultatif ─────────────────────────
@@ -885,6 +1033,8 @@
       useProxy: source.useProxy !== false,
       mode: source.mode === "random" ? "random" : "round-robin",
       cursor: Number.isInteger(source.cursor) && source.cursor >= 0 ? source.cursor : 0,
+      // Numéro de passe de la rotation équitable : conservé entre deux ouvertures.
+      passes: Number.isInteger(source.passes) && source.passes >= 0 ? source.passes : 0,
       autoDisable: source.autoDisable !== false,
     };
   }
@@ -959,6 +1109,12 @@
     proxyCredentialsLine: proxyCredentialsLine,
     maskUsername: maskUsername,
     pickProxy: pickProxy,
+    isRotatingGateway: isRotatingGateway,
+    buildProxySession: buildProxySession,
+    proxyUsageKey: proxyUsageKey,
+    hasStickySession: hasStickySession,
+    hasCountryTargeting: hasCountryTargeting,
+    DEFAULT_PROXY_PORTS: DEFAULT_PROXY_PORTS,
     applyProxyOutcome: applyProxyOutcome,
     detectPageGate: detectPageGate,
     classifyIp: classifyIp,
