@@ -96,8 +96,15 @@ export function decryptProxyRow(row, secretKey) {
 /**
  * Choisit le proxy du prochain cycle selon l'état enregistré, puis avance le
  * curseur. Retourne `null` si la rotation est désactivée ou sans proxy actif.
+ *
+ * Trois garanties pour qu'une liste serve réellement en entier :
+ *  - priorité aux résidentiels déjà identifiés (règle 1) ;
+ *  - tirage équitable : chaque passerelle est servie une fois avant qu'une
+ *    autre le soit deux fois ;
+ *  - une session figée par cycle sur les passerelles rotationnelles, pour que
+ *    la visite sorte par une seule IP au lieu d'en changer à chaque requête.
  */
-export function nextProxy(store, userId, { random = Math.random } = {}) {
+export function nextProxy(store, userId, { random = Math.random, sessionId = null, sessionMinutes = 5 } = {}) {
   const state = store.getProxyState(userId);
   if (!state.enabled) return null;
   const all = store.listProxies(userId).filter((proxy) => proxy.enabled);
@@ -116,19 +123,56 @@ export function nextProxy(store, userId, { random = Math.random } = {}) {
     candidates = [...residential, ...untested];
   }
 
-  // En mode aléatoire, on écarte le proxy du cycle précédent : deux visites de
-  // suite depuis la même IP, c'est exactement ce que la rotation doit éviter.
-  let pool = candidates;
-  if (state.rotation === 'random' && candidates.length > 1 && state.lastProxyId) {
-    pool = candidates.filter((proxy) => proxy.id !== state.lastProxyId);
-  }
-
-  const picked = utils.pickProxy(pool, { mode: state.rotation, cursor: state.cursor }, random);
+  const usage = store.getProxyUsage(userId);
+  const lastRow = state.lastProxyId ? all.find((proxy) => proxy.id === state.lastProxyId) : null;
+  const picked = utils.pickProxy(candidates, {
+    mode: state.rotation === 'random' ? 'random' : 'order',
+    cursor: state.cursor,
+    usage,
+    passes: Number(state.passes || 0),
+    // Jamais deux cycles de suite par la même passerelle.
+    lastUsageKey: lastRow ? (lastRow.usage_key || utils.proxyUsageKey(lastRow)) : '',
+  }, random);
   if (!picked?.proxy) return null;
 
-  store.saveProxyState(userId, { cursor: picked.cursor, lastProxyId: picked.proxy.id });
+  store.saveProxyState(userId, {
+    cursor: picked.cursor,
+    lastProxyId: picked.proxy.id,
+    passes: picked.passes,
+  });
+  // L'usage est compté ici, au moment du choix : c'est la passerelle qui a
+  // réellement servi le cycle, quel que soit son résultat.
+  const usageKey = picked.usageKey || utils.proxyUsageKey(picked.proxy);
+  store.recordProxyUsage(userId, usageKey);
+
   const row = store.getProxyRow(userId, picked.proxy.id);
-  return { proxy: decryptProxyRow(row, store.secretKey || ''), id: picked.proxy.id };
+  const decrypted = decryptProxyRow(row, store.secretKey || '');
+  if (!decrypted) return null;
+
+  // IP figée pour l'exécution : la passerelle résidentielle change d'IP à
+  // chaque connexion, donc sans identifiant de session la « preuve d'IP »
+  // observée n'est jamais celle qui a cliqué.
+  const session = utils.buildProxySession(decrypted, sessionId || randomSessionId(random), { durationMinutes: sessionMinutes });
+  store.setProxySession(picked.proxy.id, session.sessionId);
+  return {
+    proxy: session.proxy,
+    id: picked.proxy.id,
+    baseProxy: decrypted,
+    session: { id: session.sessionId, specialized: session.specialized, reason: session.reason },
+    usageKey,
+  };
+}
+
+/** Identifiant de session court et aléatoire (lettres seules, comme Rayobyte). */
+export function randomSessionId(random = Math.random) {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz';
+  let id = '';
+  for (let index = 0; index < 10; index += 1) {
+    const value = Number(random());
+    const safe = Number.isFinite(value) ? Math.min(0.999999, Math.max(0, value)) : 0;
+    id += alphabet[Math.floor(safe * alphabet.length)];
+  }
+  return id;
 }
 
 /**

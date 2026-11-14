@@ -1177,6 +1177,14 @@ async function startRun() {
           mode: proxySettings.mode,
           cursor: proxySettings.cursor,
           autoDisable: proxySettings.autoDisable,
+          passes: Number(proxySettings.passes) || 0,
+          // Cycles servis par passerelle : c'est ce compteur qui garantit que
+          // toute la liste tourne, au lieu de resservir toujours la même entrée.
+          usage: savedProxies.reduce((acc, proxy) => {
+            const key = InstaVAUtils.proxyUsageKey(proxy);
+            if (key) acc[key] = Number(proxy.cycles) || 0;
+            return acc;
+          }, {}),
           list: enabledProxies.map((proxy) => ({ ...proxy })),
         };
       }
@@ -1259,11 +1267,30 @@ async function startRun() {
 
       let proxy = null;
       if (proxyPool) {
-        const picked = pickProxy(proxyPool.list, { mode: proxyPool.mode, cursor: proxyPool.cursor });
+        const picked = pickProxy(proxyPool.list, {
+          mode: proxyPool.mode,
+          cursor: proxyPool.cursor,
+          usage: proxyPool.usage,
+          passes: proxyPool.passes,
+          // Jamais deux cycles de suite par la même passerelle.
+          lastUsageKey: proxyPool.lastUsageKey || "",
+        });
         proxyPool.cursor = picked.cursor;
+        proxyPool.passes = picked.passes || 0;
         proxy = picked.proxy;
         if (!proxy) {
           addLog("Aucun proxy disponible", "Tous les proxys de la liste sont désactivés; le cycle utilise le réglage proxy de Chrome.", true);
+        } else {
+          // Compteur d'usage et session figée : une visite sort par une seule IP
+          // même si la passerelle change d'adresse à chaque connexion.
+          const usageKey = picked.usageKey || InstaVAUtils.proxyUsageKey(proxy);
+          proxyPool.usage[usageKey] = (proxyPool.usage[usageKey] || 0) + 1;
+          proxyPool.lastUsageKey = usageKey;
+          const session = InstaVAUtils.buildProxySession(proxy, randomSessionId(), { durationMinutes: 5 });
+          proxy = session.proxy;
+          if (session.specialized) {
+            addLog(`${proxyLabel(picked.proxy)} · IP figée pour le cycle`, session.reason);
+          }
         }
       }
 
@@ -1346,7 +1373,8 @@ async function startRun() {
         proxy.password = "";
       });
       try {
-        await persistProxySettings({ ...proxySettings, cursor: proxyPool.cursor });
+        await persistProxySettings({ ...proxySettings, cursor: proxyPool.cursor, passes: proxyPool.passes || 0 });
+        await persistProxyUsage(proxyPool.usage);
       } catch (error) {
         addLog("Curseur de rotation non enregistré", error.message, true);
       }
@@ -1366,6 +1394,24 @@ async function startRun() {
  * Enregistre l'issue du cycle sur le proxy concerné (compteurs, échecs consécutifs,
  * désactivation automatique) et rafraîchit la liste affichée.
  */
+/** Identifiant de session court et aléatoire, au format accepté par Rayobyte. */
+function randomSessionId() {
+  const alphabet = "abcdefghijklmnopqrstuvwxyz";
+  let id = "";
+  for (let index = 0; index < 10; index += 1) id += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return id;
+}
+
+/** Reporte les cycles servis sur chaque proxy enregistré, passerelle par passerelle. */
+async function persistProxyUsage(usage) {
+  const next = savedProxies.map((proxy) => {
+    const key = InstaVAUtils.proxyUsageKey(proxy);
+    return { ...proxy, cycles: key && usage[key] !== undefined ? usage[key] : proxy.cycles };
+  });
+  savedProxies = next;
+  try { await persistProxies(next); } catch (error) { addLog("Compteurs de rotation non enregistrés", error.message, true); }
+}
+
 async function recordProxyOutcome(proxy, outcome, proxyPool) {
   const entry = proxyPool.list.find((item) => item.id === proxy.id);
   if (!entry) return;

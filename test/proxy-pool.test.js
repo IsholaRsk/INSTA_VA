@@ -171,7 +171,8 @@ test('proxy credentials stay exportable and exportable line round-trips', () => 
 });
 
 test('proxy settings default to round-robin and sanitize unknown values', () => {
-  assert.deepEqual(utils.sanitizeProxySettings(undefined), { useProxy: true, mode: 'round-robin', cursor: 0, autoDisable: true });
+  // `passes` : compteur de la rotation équitable, conservé entre deux ouvertures.
+  assert.deepEqual(utils.sanitizeProxySettings(undefined), { useProxy: true, mode: 'round-robin', cursor: 0, passes: 0, autoDisable: true });
   assert.equal(utils.sanitizeProxySettings({ mode: 'nonsense' }).mode, 'round-robin');
   assert.equal(utils.sanitizeProxySettings({ mode: 'random', useProxy: false }).mode, 'random');
   assert.equal(utils.sanitizeProxySettings({ cursor: -2 }).cursor, 0);
