@@ -39,7 +39,8 @@ const {
   dailyClickTarget,
   planVisits,
   nextVisitDelayMs,
-  normalizeLinkLabel: normalizeLinkLabelText,
+  normalizeClickLabels,
+  clickPlanFor,
   isSensitiveLabel,
   describeTargetPlan,
   validateProxyEntry,
@@ -67,6 +68,7 @@ const targetForm = $("targetForm");
 const targetPseudoInput = $("targetPseudo");
 const targetUrlInput = $("targetUrl");
 const targetLinkLabelInput = $("targetLinkLabel");
+const targetSecondLinkLabelInput = $("targetSecondLinkLabel");
 const targetModeIntervalInput = $("targetModeInterval");
 const targetModeGoalInput = $("targetModeGoal");
 const targetExecutionCountLabel = $("targetExecutionCountLabel");
@@ -218,7 +220,13 @@ function sanitizeSavedTarget(raw) {
     const rawLinkLabel = [raw.linkLabel, raw.buttonLabel, legacyClickStep?.label, legacyClickStep?.linkLabel]
       .map((value) => String(value ?? "").trim())
       .find(Boolean) || "";
-    const linkLabel = normalizeLinkLabelText(rawLinkLabel);
+    // Second libellé : il ne servira que de marqueur « deux clics », il n'est
+    // jamais recherché dans la page (comme dans Ghost-Clicker).
+    const rawSecondLabel = [raw.secondLinkLabel, raw.secondButtonLabel, legacyClickStep?.secondLabel]
+      .map((value) => String(value ?? "").trim())
+      .find(Boolean) || "";
+    const labels = normalizeClickLabels(rawLinkLabel, rawSecondLabel);
+    if (!labels.ok) return null;
     const executionTarget = parseTargetVisits(raw.executionTarget);
     const mode = normalizeTargetMode(raw.mode);
     // La durée est exprimée en jours. Les anciennes fiches en semaines (<= 0.9.0)
@@ -229,14 +237,14 @@ function sanitizeSavedTarget(raw) {
     const durationDays = parseTargetDays(legacyDays);
     if (!pseudo || pseudo.length > 60) return null;
     if (executionTarget === null) return null;
-    if (!linkLabel.ok) return null;
     // La durée n'est conservée qu'en mode intervalle; en mode objectif elle est ignorée.
     if (mode === "interval" && durationDays === null) return null;
     return {
       id: raw.id,
       pseudo,
       url,
-      linkLabel: linkLabel.label,
+      linkLabel: labels.first,
+      secondLinkLabel: labels.second,
       mode,
       executionTarget,
       durationDays: mode === "interval" ? durationDays : DEFAULT_TARGET_DAYS,
@@ -283,7 +291,9 @@ function renderTargetList() {
     const meta = document.createElement("p");
     meta.className = "target-meta";
     const modeLabel = target.mode === "goal" ? "Objectif" : "Intervalle";
-    const linkText = target.linkLabel ? `« ${target.linkLabel} »` : "lien principal (libellé vide)";
+    const linkText = target.linkLabel
+      ? `« ${target.linkLabel} »${target.secondLinkLabel ? " puis 2ᵉ clic au même emplacement" : ""}`
+      : "aucun clic (redirection automatique)";
     const planText = target.mode === "goal"
       ? `${target.executionTarget} visite(s) d’affilée, sans durée`
       : `${target.executionTarget} visite(s) enchaînées sur ${target.durationDays} jour(s) · ≥ ${MIN_VISITS_PER_DAY} clics/jour`;
@@ -365,9 +375,11 @@ function readTargetForm() {
   if (!pseudo) throw new Error("Renseigne un pseudo ou nom de cible.");
   if (pseudo.length > 60) throw new Error("Le pseudo doit faire 60 caractères maximum.");
   const url = normalizeTargetUrl(targetUrlInput.value);
-  // Libellé facultatif : vide = le bot clique le lien principal de la page.
-  const linkLabel = normalizeLinkLabelText(targetLinkLabelInput.value);
-  if (!linkLabel.ok) throw new Error(linkLabel.message);
+  // Libellés facultatifs, règle Ghost-Clicker : aucun libellé = aucun clic
+  // (on attend une redirection de la page), un libellé = un clic, deux
+  // libellés = second clic au même emplacement.
+  const labels = normalizeClickLabels(targetLinkLabelInput.value, targetSecondLinkLabelInput.value);
+  if (!labels.ok) throw new Error(labels.message);
   const mode = selectedTargetMode();
   const executionTarget = parseTargetVisits(targetExecutionCountInput.value);
   if (executionTarget === null) {
@@ -377,7 +389,7 @@ function readTargetForm() {
   if (mode === "interval" && durationDays === null) {
     throw new Error(`Durée en jours invalide : saisis un entier entre 1 et ${MAX_TARGET_DURATION_DAYS}.`);
   }
-  return { pseudo, url, linkLabel: linkLabel.label, mode, executionTarget, durationDays };
+  return { pseudo, url, linkLabel: labels.first, secondLinkLabel: labels.second, mode, executionTarget, durationDays };
 }
 
 function selectedTargetMode() {
@@ -401,7 +413,7 @@ function applyTargetModeToForm() {
   targetExecutionCountLabel.textContent = isGoal ? "Nombre cible" : "Nombre visé";
   targetExecutionCountInput.placeholder = isGoal ? "Ex. 500" : "Ex. 10";
   targetModeHint.textContent = isGoal
-    ? "Le bot enchaîne exactement ce nombre de visites en une seule fois, sans durée ni étalement. Avec un libellé, il clique ce lien à chaque visite; sans libellé, il clique le lien principal de la page."
+    ? "Le bot enchaîne exactement ce nombre de visites en une seule fois, sans durée ni étalement. Avec un libellé, il clique ce lien à chaque visite; avec deux, il reclique au même emplacement; sans libellé, il n’effectue aucun clic et attend une redirection de la page."
     : `Le nombre saisi est exécuté à l'identique sur la durée choisie (1 à ${MAX_TARGET_DURATION_DAYS} jours), clics enchaînés avec une pause courte, sans plafond quotidien. Au moins ${MIN_VISITS_PER_DAY} clics par jour : un nombre trop faible est relevé à ce minimum.`;
 }
 
@@ -1051,6 +1063,7 @@ function editTarget(id) {
   targetPseudoInput.value = target.pseudo;
   targetUrlInput.value = target.url;
   targetLinkLabelInput.value = target.linkLabel;
+  targetSecondLinkLabelInput.value = target.secondLinkLabel || "";
   targetExecutionCountInput.value = String(target.executionTarget);
   targetDurationWeeksInput.value = String(target.durationDays);
   setTargetMode(target.mode);
@@ -1138,8 +1151,8 @@ async function startRun() {
   try {
     for (const target of selectedTargets) {
       normalizeTargetUrl(target.url);
-      const label = normalizeLinkLabelText(target.linkLabel);
-      if (!label.ok) throw new Error(`Libellé du lien de « ${target.pseudo} » : ${label.message}`);
+      const labels = normalizeClickLabels(target.linkLabel, target.secondLinkLabel);
+      if (!labels.ok) throw new Error(`Libellés de « ${target.pseudo} » : ${labels.message}`);
       if (parseTargetVisits(target.executionTarget) === null) {
         throw new Error(`Nombre de visites invalide pour « ${target.pseudo} » (entier positif, maximum ${MAX_TARGET_VISITS.toLocaleString("fr")}).`);
       }
@@ -1276,10 +1289,15 @@ async function startRun() {
 
       // Mode objectif : une seule confirmation pour tout le lot.
       if (plan.batch && plan.batchApproval === null && planRequiresConfirmation(plan)) {
-        const label = plan.target.linkLabel;
+        const clicks = clickPlanFor(plan.target);
+        const clickText = clicks.clicks === 0
+          ? "aucun clic (redirection automatique de la page)"
+          : clicks.clicks === 2
+            ? `« ${clicks.first} » puis 2ᵉ clic au même emplacement`
+            : `« ${clicks.first} »`;
         const approved = await askConfirmation(
           `Mode objectif · ${plan.target.pseudo}\n${plan.count.toLocaleString("fr")} visite(s) vont s’enchaîner sur ${plan.target.url}\n` +
-          `Lien : ${label ? `« ${label} »` : "choisi automatiquement (lien principal de la page)"}.\n` +
+          `Clics par visite : ${clickText}.\n` +
           "Une seule validation couvre toute la série.",
         );
         plan.batchApproval = approved ? "granted" : "declined";
@@ -1487,7 +1505,9 @@ function getNextDueAt(plan) {
  * on demande une seule confirmation pour toute la série au lieu d'une par visite.
  */
 function planRequiresConfirmation(plan) {
-  return confirmClicksInput.checked || isSensitiveLabel(plan.target.linkLabel || "");
+  const clicks = clickPlanFor(plan.target);
+  return confirmClicksInput.checked || Boolean(clicks.first && isSensitiveLabel(clicks.first))
+    || Boolean(clicks.second && isSensitiveLabel(clicks.second));
 }
 
 async function executeTargetRun(target, runIndex, runCount, windowId, proxy, proxyPool, options = {}) {
@@ -1691,9 +1711,10 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
       return { status: isHardBlock ? "blocked" : "challenged", gate, proxyActive };
     }
 
-    const label = target.linkLabel;
+    const clickPlan = clickPlanFor(target);
+    const label = clickPlan.first;
     const activePageTabId = tab.id;
-    setStatus(`${target.pseudo} · vérification du lien exact…`);
+    setStatus(`${target.pseudo} · ${clickPlan.clicks ? "vérification du libellé exact…" : "attente d’une redirection…"}`);
     const screenshot = await captureScreen(activePageTabId);
     renderScreenshot(screenshot);
     let ocrResult = { text: "", words: [], width: 0, height: 0 };
@@ -1709,32 +1730,42 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
       }
     }
 
-    let match;
-    if (label) {
-      const matches = await findExactClickables(activePageTabId, label);
-      if (!matches.length) {
-        addLog(`${target.pseudo} · libellé introuvable`, `Aucun lien ni bouton visible dont le libellé complet correspond à « ${label} ». Aucun clic effectué.`, true);
-        return { status: "skipped", proxyActive };
+    // ---- Règle Ghost-Clicker : zéro, un ou deux clics selon la configuration.
+    const childTabPromise = waitForOpenedTab(activePageTabId, (childTab) => {
+      childTabIds.push(childTab.id);
+      monitoredTabIds.add(childTab.id);
+    }, REDIRECT_MAX_WAIT_MS);
+
+    // Aucun libellé : aucun clic. La visite ne réussit que si la page redirige
+    // d'elle-même ; sinon c'est un échec franc, comme « aucune destination ».
+    if (clickPlan.clicks === 0) {
+      addLog(`${target.pseudo} · aucun clic demandé`, "La cible n’a aucun libellé : la page est simplement ouverte, en attente d’une redirection automatique ou d’un nouvel onglet.");
+      const destination = await waitForNavigationOutcome(activePageTabId, finalTab.url || url, childTabPromise);
+      if (!destination) {
+        addLog(`${target.pseudo} · aucune destination`, "Aucune redirection ni nouvel onglet n’a été détecté avant la fin du délai. La visite échoue : sans clic et sans redirection, il n’y a pas de visite.", true);
+        throw new Error("Aucune redirection ni nouvel onglet n’a été détecté.");
       }
-      if (matches.length > 1) {
-        addLog(`${target.pseudo} · libellés identiques`, `${matches.length} éléments visibles (liens ou boutons) portent le libellé complet « ${label} ». Aucun clic effectué pour éviter une sélection ambiguë.`, true);
-        return { status: "skipped", proxyActive };
-      }
-      match = matches[0];
-    } else {
-      // Aucun libellé : on clique sans critère de texte.
-      const primary = await findPrimaryLink(activePageTabId);
-      if (!primary.picked) {
-        addLog(`${target.pseudo} · aucun élément cliquable`, "La page chargée ne contient aucun lien ni bouton visible. Aucun clic effectué.", true);
-        return { status: "skipped", proxyActive };
-      }
-      match = primary.picked;
-      addLog(
-        `${target.pseudo} · cible choisie automatiquement`,
-        `${primary.links.length} élément(s) cliquable(s) → ${primary.picked.reason} : ${primary.picked.text ? `« ${primary.picked.text} »` : "sans texte"}${primary.picked.href ? `\n→ ${primary.picked.href}` : ""}`
-        + (primary.picked.bioLink ? "\nLien en bio reconnu : il passe devant les boutons d’action du profil." : ""),
-      );
+      activeTabId = destination.tabId;
+      finalTab = await waitForStableUrl(destination.tabId, false);
+      currentUrlNode.textContent = finalTab.url || "";
+      addLog(`${target.pseudo} · redirection automatique`, `→ ${finalTab.url || "URL inconnue"}${destination.openedTab ? " · nouvel onglet" : ""}`);
+      if (!stopRequested) addLog(`${target.pseudo} · cycle terminé`, "Redirection automatique détectée, aucun clic effectué.");
+      return { status: "success", proxyActive };
     }
+
+    const matches = await findExactClickables(activePageTabId, label);
+    if (!matches.length) {
+      addLog(`${target.pseudo} · libellé introuvable`, `Aucun lien ni bouton visible dont le libellé complet correspond à « ${label} ». Aucun clic effectué.`, true);
+      childTabPromise.cancel?.();
+      return { status: "skipped", proxyActive };
+    }
+    // Plusieurs éléments portent le même libellé : Ghost-Clicker prend le
+    // premier du document. La page renvoie les éléments dans l'ordre du DOM.
+    const match = matches[0];
+    if (matches.length > 1) {
+      addLog(`${target.pseudo} · ${matches.length} libellés identiques`, `« ${label} » apparaît ${matches.length} fois : le premier élément de la page est cliqué, comme Ghost-Clicker.`);
+    }
+
     const ocrPhrase = findOcrPhrase(ocrResult.words, label);
     if (ocrPhrase) {
       // La capture est prise dans le même viewport émulé : même échelle que les coordonnées DOM.
@@ -1749,27 +1780,49 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
     } else if (ocrResult.words.length) {
       addLog(`${target.pseudo} · OCR sans correspondance`, `Le libellé « ${label} » n’a pas été relu dans la capture; la détection DOM exacte est conservée.`);
     }
+
     const kind = match.type || "lien";
-    const description = label
-      ? `Cible : ${target.pseudo}\nCliquer une fois sur le ${kind} « ${label} »${match.href ? ` (${match.href})` : ""}.`
-      : `Cible : ${target.pseudo}\nCliquer une fois sur le ${kind} choisi automatiquement${match.text ? ` : « ${match.text} »` : ""}${match.href ? ` (${match.href})` : ""}.`;
+    const doubleClick = clickPlan.clicks === 2;
+    const description = doubleClick
+      ? `Cible : ${target.pseudo}\nCliquer « ${label} » puis une seconde fois au même emplacement (second libellé : « ${clickPlan.second} »)${match.href ? ` (${match.href})` : ""}.`
+      : `Cible : ${target.pseudo}\nCliquer une fois sur le ${kind} « ${label} »${match.href ? ` (${match.href})` : ""}.`;
     const sensitive = isSensitiveLabel(label);
     const needsConfirm = (confirmClicksInput.checked || sensitive) && !options.skipConfirm;
     if (needsConfirm && !(await askConfirmation(description))) {
-      addLog(`${target.pseudo} · clic ignoré`, `${kind} « ${label || match.text || ""} »`);
+      addLog(`${target.pseudo} · clic ignoré`, `${kind} « ${label} »`);
+      childTabPromise.cancel?.();
       return { status: "skipped", proxyActive };
     }
-    if (stopRequested) return { status: "skipped", proxyActive };
+    if (stopRequested) {
+      childTabPromise.cancel?.();
+      return { status: "skipped", proxyActive };
+    }
 
     const redirectsBeforeClick = redirectCount;
-    const openedTabPromise = waitForOpenedTab(activePageTabId, (childTab) => {
-      childTabIds.push(childTab.id);
-      monitoredTabIds.add(childTab.id);
-    });
+    const previousUrl = finalTab.url || url;
     await clickAt(activePageTabId, match.x, match.y);
     clicked = true;
-    const openedTab = await openedTabPromise;
-    addLog(`${target.pseudo} · ${kind} cliqué`, `« ${label || match.text || ""} »${match.href ? ` → ${match.href}` : ""}`);
+    addLog(`${target.pseudo} · ${kind} cliqué`, `« ${label} »${match.href ? ` → ${match.href}` : ""}`);
+
+    // Second clic : 500 ms d'attente, puis RIEN si l'URL a déjà changé ou si un
+    // onglet s'est ouvert — exactement la condition de Ghost-Clicker.
+    if (doubleClick) {
+      await delay(500);
+      const currentTab = await chromeCall(chrome.tabs.get, activePageTabId).catch(() => null);
+      const openedAlready = childTabIds.length > 0;
+      const urlMoved = (currentTab?.url || "") !== previousUrl && (currentTab?.url || "") !== "";
+      if (!urlMoved && !openedAlready) {
+        await clickAt(activePageTabId, match.x, match.y);
+        clicked = true;
+        addLog(`${target.pseudo} · second clic`, `Même emplacement (${Math.round(match.x)}, ${Math.round(match.y)}) · le second libellé « ${clickPlan.second} » n’est pas recherché dans la page.`);
+      } else {
+        addLog(`${target.pseudo} · second clic annulé`, urlMoved
+          ? "L’URL a déjà changé après le premier clic : le second clic est inutile."
+          : "Un nouvel onglet s’est déjà ouvert : le second clic est inutile.");
+      }
+    }
+
+    const openedTab = await childTabPromise;
     if (openedTab) {
       activeTabId = openedTab.id;
       finalTab = await waitForStableUrl(openedTab.id, false);
@@ -1922,25 +1975,59 @@ async function restoreTemporaryProxyIfNeeded(recovery = null) {
   return true;
 }
 
+/**
+ * Attend l'ouverture d'un onglet enfant. La promesse résout `null` au délai ;
+ * `cancel()` la libère tout de suite (par exemple : clic finalement refusé),
+ * sans laisser un minuteur ni un écouteur derrière elle.
+ */
 function waitForOpenedTab(openerTabId, onOpened, timeoutMs = 900) {
-  return new Promise((resolve) => {
-    let settled = false;
-    let timer = null;
-    const finish = (tab) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      chrome.tabs.onCreated.removeListener(onCreated);
-      resolve(tab);
-    };
-    const onCreated = (tab) => {
-      if (tab.openerTabId !== openerTabId) return;
-      onOpened?.(tab);
-      finish(tab);
-    };
-    chrome.tabs.onCreated.addListener(onCreated);
-    timer = setTimeout(() => finish(null), timeoutMs);
-  });
+  let settled = false;
+  let timer = null;
+  let resolvePromise = null;
+  const promise = new Promise((resolve) => { resolvePromise = resolve; });
+  const finish = (tab) => {
+    if (settled) return;
+    settled = true;
+    if (timer) clearTimeout(timer);
+    chrome.tabs.onCreated.removeListener(onCreated);
+    resolvePromise(tab);
+  };
+  function onCreated(tab) {
+    if (tab.openerTabId !== openerTabId) return;
+    onOpened?.(tab);
+    finish(tab);
+  }
+  chrome.tabs.onCreated.addListener(onCreated);
+  timer = setTimeout(() => finish(null), timeoutMs);
+  promise.cancel = () => finish(null);
+  return promise;
+}
+
+/**
+ * Attend une navigation observable après l'ouverture de la page : changement
+ * d'URL de l'onglet courant, ou ouverture d'un nouvel onglet. C'est la
+ * condition de réussite d'une visite sans clic (Ghost-Clicker). Renvoie
+ * `{ tabId, openedTab }` ou `null` au délai.
+ */
+async function waitForNavigationOutcome(tabId, initialUrl, openedTabPromise) {
+  const started = Date.now();
+  let openedTab = null;
+  openedTabPromise?.then?.((value) => { openedTab = value; });
+  while (Date.now() - started < REDIRECT_MAX_WAIT_MS) {
+    if (stopRequested) throw new Error("Traitement arrêté.");
+    const tab = await chromeCall(chrome.tabs.get, tabId).catch(() => null);
+    const currentUrl = tab?.url || "";
+    if (currentUrl && currentUrl !== "about:blank" && currentUrl !== initialUrl) {
+      return { tabId, openedTab: false };
+    }
+    if (openedTab && openedTab.id !== undefined) {
+      const childTab = await chromeCall(chrome.tabs.get, openedTab.id).catch(() => null);
+      const childUrl = childTab?.url || "";
+      if (childUrl && childUrl !== "about:blank") return { tabId: openedTab.id, openedTab: true };
+    }
+    await delay(250);
+  }
+  return null;
 }
 
 /**
@@ -2042,76 +2129,6 @@ async function findExactClickables(tabId, label) {
   if (result.exceptionDetails) throw new Error("Impossible de vérifier le libellé du lien ou du bouton dans la page.");
   if (!Array.isArray(result.result?.value)) throw new Error("La page n’a pas renvoyé les éléments cliquables visibles.");
   return result.result.value;
-}
-
-/**
- * Libellé vide : le bot clique tout seul le contrôle principal de la page
- * (lien ou bouton), en privilégiant la surface et le texte hors navigation.
- */
-async function findPrimaryLink(tabId) {
-  const expression = `(() => {
-    const NAV = 'header, nav, footer, aside, [role="navigation"], [role="banner"], [role="contentinfo"]';
-    ${clickableHelpersSource()}
-    const elements = Array.from(document.querySelectorAll(${JSON.stringify(CLICKABLE_SELECTOR)}));
-    elements.forEach((element, index) => { element.dataset.instavaIndex = String(index); });
-    const visible = [];
-    for (const element of elements) {
-      if (!isVisible(element)) continue;
-      if (element instanceof HTMLAnchorElement) {
-        const rawHref = element.href || "";
-        if (!rawHref) continue;
-        const current = location.href.split('#')[0];
-        if (rawHref.split('#')[0] === current && (rawHref.includes('#') || rawHref === '#')) continue;
-        if (/^(javascript:|mailto:|tel:)/i.test(element.getAttribute('href') || '')) continue;
-      }
-      const description = describe(element);
-      const inNavigation = Boolean(element.closest(NAV));
-      const isControl = element.tagName === 'BUTTON' || element.getAttribute('role') === 'button' ||
-        (element.tagName === 'INPUT' && /^(button|submit)$/i.test(element.type));
-      // Aucun appel aux fonctions du panneau ici : ce code s'exécute DANS la
-      // page, où bot-utils n'est pas chargé. Le classement est fait juste
-      // après, côté panneau, avec la même fonction qu'avant (définition unique).
-      visible.push({
-        ...description,
-        inNavigation,
-        isControl,
-      });
-    }
-    return visible;
-  })()`;
-  const result = await sendCDP(tabId, "Runtime.evaluate", {
-    expression,
-    returnByValue: true,
-    awaitPromise: true,
-  });
-  if (result.exceptionDetails) throw new Error("Impossible de repérer les éléments cliquables de la page.");
-  const links = Array.isArray(result.result?.value) ? result.result.value : [];
-  if (!links.length) return { links, picked: null };
-  // Classement ici, dans le panneau : `scoreClickable` vient de bot-utils, qui
-  // n'existe pas dans la page. L'appeler dans le contexte de la page levait
-  // « InstaVAUtils is not defined » et le cycle échouait sur
-  // « Impossible de repérer les éléments cliquables de la page. »
-  const scored = links.map((link) => {
-    const ranking = InstaVAUtils.scoreClickable({
-      text: link.text,
-      href: link.href,
-      area: link.area,
-      kind: link.type,
-      inNavigation: link.inNavigation,
-      isControl: link.isControl,
-      tagName: link.tagName,
-      hasClickHandler: link.hasClickHandler,
-    });
-    return { ...link, score: ranking.score, bioLink: ranking.bioLink, actionButton: ranking.actionButton };
-  });
-  scored.sort((a, b) => b.score - a.score);
-  if (scored.length === 1) return { links: scored, picked: { ...scored[0], reason: `seul ${scored[0].type} visible` } };
-  const main = scored.filter((link) => !link.inNavigation);
-  const picked = (main.length ? main : scored)[0];
-  return {
-    links: scored,
-    picked: { ...picked, reason: main.length ? `${picked.type} principal` : `${picked.type} principal (toute la page est en navigation)` },
-  };
 }
 
 /** Clé de comparaison des libellés dans la page (casse, accents, espaces normalisés). */
