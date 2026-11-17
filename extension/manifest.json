@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Agent visuel local — cibles et redirections",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Ouvre des URL et clique exactement le lien ou le bouton demandé : aucun libellé = aucun clic, deux libellés = second clic au même emplacement, comme Ghost-Clicker. Répète selon le mode intervalle (au moins 100 clics/jour) ou objectif, avec une liste de proxys en rotation.",
   "minimum_chrome_version": "116",
   "permissions": [
+    "declarativeNetRequest",
     "debugger",
     "proxy",
     "sidePanel",
