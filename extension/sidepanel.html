@@ -11,7 +11,7 @@
       <header class="header">
         <div class="eyebrow">CHROME · VISION LOCALE</div>
         <h1>Cibles URL enregistrées</h1>
-        <p>Pour chaque cible, le bot suit toujours le même cycle : ouvrir l’URL, cliquer sur le lien indiqué (ou le lien principal si aucun libellé n’est saisi), attendre la redirection, puis recommencer selon le mode choisi — intervalle ou objectif. Aucun workflow à construire.</p>
+        <p>Pour chaque cible, le bot suit toujours le même cycle : ouvrir l’URL, exécuter **zéro, un ou deux clics** selon les libellés saisis (comme Ghost-Clicker), attendre la redirection, puis recommencer selon le mode choisi — intervalle ou objectif. Aucun workflow à construire.</p>
       </header>
 
       <section class="card target-list-card">
@@ -53,9 +53,13 @@
           <label for="targetUrl" class="space-top">URL cible</label>
           <input id="targetUrl" type="text" maxlength="2048" required spellcheck="false" placeholder="https://exemple.com/page">
 
-          <label for="targetLinkLabel" class="space-top">Libellé exact du lien ou du bouton à cliquer <span>(facultatif)</span></label>
-          <input id="targetLinkLabel" type="text" maxlength="100" spellcheck="false" placeholder="Laisser vide pour cliquer l’élément principal">
-          <p class="hint"><strong>Facultatif.</strong> Renseigné, le bot clique le <strong>lien ou le bouton</strong> visible dont le libellé correspond exactement (casse, accents et espaces normalisés). <strong>Vide, il se contente de cliquer</strong> : s’il n’y a qu’un élément cliquable, c’est celui-là; sinon l’élément principal (le plus grand, avec du texte, hors navigation) est utilisé.</p>
+          <label for="targetLinkLabel" class="space-top">Premier libellé exact à cliquer <span>(facultatif)</span></label>
+          <input id="targetLinkLabel" type="text" maxlength="100" spellcheck="false" placeholder="Vide = aucun clic, la page doit rediriger d’elle-même">
+          <p class="hint"><strong>Aucun libellé : aucun clic.</strong> Le bot ouvre la page et attend une redirection automatique ou l’ouverture d’un nouvel onglet. <strong>Un libellé : un clic</strong> sur le lien ou le bouton visible dont le texte correspond exactement (casse, accents et espaces normalisés). S’il y a plusieurs correspondances, la première est cliquée.</p>
+
+          <label for="targetSecondLinkLabel" class="space-top">Second libellé <span>(facultatif, active le double clic)</span></label>
+          <input id="targetSecondLinkLabel" type="text" maxlength="100" spellcheck="false" placeholder="Renseigné = 2ᵉ clic au même emplacement après 500 ms">
+          <p class="hint"><strong>Deux libellés : deux clics au même endroit.</strong> Le second libellé indique seulement qu’un second clic est attendu ; il n’est pas recherché dans la page. Après 500 ms, si l’URL n’a pas bougé et qu’aucun onglet ne s’est ouvert, le bot reclique exactement au même emplacement.</p>
 
           <fieldset class="mode-fieldset space-top">
             <legend>Mode d’exécution</legend>
