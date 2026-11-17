@@ -105,6 +105,36 @@
         <p class="hint">La confirmation est activée par défaut. Décoche-la pour laisser les cycles du mode intervalle s’enchaîner sans pause; les libellés sensibles restent toujours soumis à confirmation.</p>
       </section>
 
+      <section class="card options-card">
+        <div class="section-title list-heading">
+          <div>
+            <h2>Trafic proxy</h2>
+            <p class="hint">Ce que le bot ne télécharge pas ne coûte rien : les requêtes bloquées sont abandonnées avant d’être émises, donc sans consommer un octet de bande passante proxy.</p>
+          </div>
+        </div>
+        <label class="check-row">
+          <input id="trafficBlockImages" type="checkbox" checked>
+          <span>Bloquer les images</span>
+        </label>
+        <label class="check-row">
+          <input id="trafficBlockMedia" type="checkbox" checked>
+          <span>Bloquer les vidéos et l’audio</span>
+        </label>
+        <label class="check-row">
+          <input id="trafficBlockFonts" type="checkbox" checked>
+          <span>Bloquer les polices web</span>
+        </label>
+        <label class="check-row">
+          <input id="trafficBlockStyles" type="checkbox">
+          <span>Bloquer aussi les feuilles de style <em>(risqué : un élément masqué peut paraître visible)</em></span>
+        </label>
+        <label class="check-row">
+          <input id="trafficBlockTrackers" type="checkbox" checked>
+          <span>Bloquer les traceurs et la mesure d’audience</span>
+        </label>
+        <p class="hint" id="trafficStats">Aucune visite mesurée pour l’instant.</p>
+      </section>
+
       <section class="card proxy-card">
         <div class="section-title list-heading">
           <div>
@@ -232,6 +262,7 @@
 
     <script src="vendor/tesseract.min.js"></script>
     <script src="bot-utils.js"></script>
+    <script src="traffic.js"></script>
     <script src="sidepanel.js"></script>
   </body>
 </html>

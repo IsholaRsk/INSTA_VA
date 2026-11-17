@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-const files = ['extension/bot-utils.js', 'extension/sidepanel.js', 'extension/service_worker.js'];
+const files = ['extension/bot-utils.js', 'extension/traffic.js', 'extension/sidepanel.js', 'extension/service_worker.js'];
 const sources = new Map(files.map((file) => [file, readFileSync(new URL(`../${file}`, import.meta.url), 'utf8')]));
 
 /** Tous les noms déclarés par un fichier de l'extension (fonctions, variables, paramètres de haut niveau). */
@@ -152,12 +152,17 @@ test('extension scripts never call an undeclared function', () => {
   assert.deepEqual([...new Set(problems)], [], `Fonctions manquantes :\n${[...new Set(problems)].join('\n')}`);
 });
 
-test('the side panel loads its shared helper before sidepanel.js', () => {
+test('the side panel loads its shared helpers before sidepanel.js', () => {
   const html = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
   const utilsIndex = html.indexOf('<script src="bot-utils.js"></script>');
+  const trafficIndex = html.indexOf('<script src="traffic.js"></script>');
   const panelIndex = html.indexOf('<script src="sidepanel.js"></script>');
   assert.ok(utilsIndex >= 0, 'bot-utils.js doit être inclus dans le panneau');
+  assert.ok(trafficIndex >= 0, 'traffic.js doit être inclus dans le panneau');
   assert.ok(panelIndex > utilsIndex, 'bot-utils.js doit être chargé avant sidepanel.js');
+  // Le panneau lit InstaVATraffic dès son évaluation : sans cet ordre, il
+  // lèverait « traffic.js n’a pas été chargé » à l’ouverture.
+  assert.ok(panelIndex > trafficIndex, 'traffic.js doit être chargé avant sidepanel.js');
   assert.ok(html.includes('vendor/tesseract.min.js'), 'le moteur OCR local doit être inclus');
 });
 

@@ -8,6 +8,10 @@ const DEFAULT_TARGET_DAYS = 7;
 const DEFAULT_VISIT_INTERVAL_MS = 2500;
 const DAILY_JOURNAL_KEY = "dailyClicks";
 const DAILY_JOURNAL_KEEP_DAYS = 40;
+const TRAFFIC_POLICY_KEY = "trafficPolicy";
+// Plage d'identifiants réservée aux règles DNR du bot (500 règles maximum).
+const TRAFFIC_RULE_ID_BASE = 1000;
+const TRAFFIC_STATS_KEY = "trafficStats";
 const PROXY_RECOVERY_KEY = "temporaryProxyRecovery";
 const PROXY_AUTH_SESSION_KEY = "temporaryProxyAuth";
 // Pause entre deux clics d'une même série : courte et variable. Aucun écart
@@ -19,6 +23,10 @@ const REDIRECT_QUIET_MS = 2500;
 const REDIRECT_MAX_WAIT_MS = 15000;
 const MIN_OCR_CONFIDENCE = 45;
 const OCR_ASSET_BASE = "vendor/";
+
+const Traffic = globalThis.InstaVATraffic;
+if (!Traffic) throw new Error("Le module traffic.js n’a pas été chargé.");
+const { buildBlockPolicy, normalizeBlockedTypes, summarizeSavings, formatBytes } = Traffic;
 
 const Utils = globalThis.InstaVAUtils;
 if (!Utils) throw new Error("Le module bot-utils.js n’a pas été chargé.");
@@ -111,6 +119,12 @@ const applyDurationToAllButton = $("applyDurationToAll");
 const languageInput = $("ocrLanguage");
 const ocrWorkerStatusNode = $("ocrWorkerStatus");
 const confirmClicksInput = $("confirmClicks");
+const trafficBlockImagesInput = $("trafficBlockImages");
+const trafficBlockMediaInput = $("trafficBlockMedia");
+const trafficBlockFontsInput = $("trafficBlockFonts");
+const trafficBlockStylesInput = $("trafficBlockStyles");
+const trafficBlockTrackersInput = $("trafficBlockTrackers");
+const trafficStatsNode = $("trafficStats");
 const startButton = $("startButton");
 const stopButton = $("stopButton");
 const statusNode = $("status");
@@ -187,6 +201,21 @@ window.addEventListener("pagehide", () => {
 
 initializeTargets();
 initializeProxies();
+initializeTraffic();
+
+/** Charge la politique de trafic enregistrée et affiche les octets mesurés. */
+async function initializeTraffic() {
+  try {
+    const stored = await chrome.storage.local.get(TRAFFIC_POLICY_KEY);
+    const saved = stored?.[TRAFFIC_POLICY_KEY];
+    // Premier lancement : les cases HTML portent déjà les valeurs par défaut,
+    // on ne les écrase pas avec une politique vide.
+    if (saved && typeof saved === "object") applyTrafficPolicyToUi(saved);
+  } catch {
+    // Un stockage illisible laisse simplement les valeurs par défaut.
+  }
+  await renderTrafficStats();
+}
 
 async function initializeTargets() {
   setConfigurationDisabled(true);
@@ -1635,6 +1664,7 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
   let failure = null;
   let proxyApplied = false;
   let proxyActivationAttempted = false;
+  let traffic = null;
   const redirectListener = (details) => {
     if (!monitoredTabIds.has(details.tabId) || details.frameId !== 0) return;
     if ((details.transitionQualifiers || []).some((item) => item.includes("redirect"))) redirectCount += 1;
@@ -1659,6 +1689,24 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
       screenWidth: VIEWPORT.width,
       screenHeight: VIEWPORT.height,
     });
+
+    // Économie de bande passante : images, vidéos, polices et traceurs sont
+    // abandonnés AVANT d'être émis, donc sans consommer un octet de proxy.
+    try {
+      traffic = await enableTrafficSaving([tab.id]);
+      if (traffic.active) {
+        addLog(
+          `${target.pseudo} · trafic réduit`,
+          `Blocage avant émission : ${traffic.types.join(", ") || "aucun type"}`
+            + `${traffic.patterns.length ? ` · ${traffic.patterns.length} domaine(s) de traqueurs` : ""}. `
+            + "Ces requêtes ne traversent pas le proxy.",
+        );
+      }
+    } catch (error) {
+      // Le filtrage est une optimisation : sans lui la visite reste valide.
+      addLog(`${target.pseudo} · trafic non filtré`, `${error.message} La visite continue sans blocage.`, true);
+      traffic = null;
+    }
 
     // Le proxy reste actif pendant toute la navigation, le clic et la redirection.
     if (useProxy) {
@@ -1734,6 +1782,9 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
     const childTabPromise = waitForOpenedTab(activePageTabId, (childTab) => {
       childTabIds.push(childTab.id);
       monitoredTabIds.add(childTab.id);
+      // La page de destination ouverte par le clic passe par le proxy : elle
+      // doit être filtrée comme l'onglet d'origine.
+      traffic?.includeTab?.(childTab.id);
     }, REDIRECT_MAX_WAIT_MS);
 
     // Aucun libellé : aucun clic. La visite ne réussit que si la page redirige
@@ -1866,6 +1917,17 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
       } catch (error) {
         addLog("Le proxy Chrome doit être restauré", error.message, true);
       }
+    }
+    if (traffic) {
+      const measured = traffic.stats();
+      await traffic.dispose();
+      await recordTrafficStats(measured.bytes, measured.blocked);
+      await renderTrafficStats();
+      addLog(
+        `${target.pseudo} · trafic mesuré`,
+        `${formatBytes(measured.bytes)} transférés · ${measured.blocked} requête(s) bloquée(s) (donc non facturées).`,
+      );
+      traffic = null;
     }
     chrome.webNavigation.onCommitted.removeListener(redirectListener);
     for (const childTabId of childTabIds) {
@@ -2028,6 +2090,240 @@ async function waitForNavigationOutcome(tabId, initialUrl, openedTabPromise) {
     await delay(250);
   }
   return null;
+}
+
+/**
+ * Active le blocage réseau sur les onglets du bot, AVANT le premier octet.
+ *
+ * `declarativeNetRequest` est préféré à une interception CDP pour trois
+ * raisons décisives ici :
+ *  - il agit au niveau réseau : la requête n'est jamais émise, donc elle ne
+ *    consomme pas un octet de bande passante proxy ;
+ *  - il suit les onglets ouverts par un clic (`includeTab`), qu'une
+ *    interception liée à un seul onglet laisserait charger sans filtre ;
+ *  - il ne coûte aucun aller-retour par requête, contrairement à `Fetch`.
+ *
+ * Les règles sont des règles de SESSION (seules autorisées à porter `tabIds`)
+ * et sont retirées dès la fin de la visite.
+ *
+ * Retourne { active, types, patterns, includeTab(), stats(), dispose() }.
+ */
+async function enableTrafficSaving(tabIds, policy) {
+  const effective = policy || buildBlockPolicy(await loadTrafficPolicy());
+  if (!effective.active) {
+    return { active: false, types: [], patterns: [], includeTab: async () => {}, stats: () => ({ blocked: 0, bytes: 0 }), dispose: async () => {} };
+  }
+
+  // Portée : uniquement les onglets du bot. La navigation personnelle de
+  // l'utilisateur n'est jamais filtrée.
+  const botTabIds = (Array.isArray(tabIds) ? tabIds : []).filter((id) => Number.isInteger(id));
+  const ruleIds = Array.from({ length: effective.patterns.length + effective.types.length }, (_, index) => TRAFFIC_RULE_ID_BASE + index);
+
+  /** Reconstruit les règles avec la portée courante. */
+  const buildRules = (scope) => {
+    const scoped = scope.length ? { tabIds: [...scope] } : {};
+    const built = [];
+    let id = TRAFFIC_RULE_ID_BASE;
+    for (const pattern of effective.patterns) {
+      built.push({
+        id,
+        priority: 1,
+        action: { type: "block" },
+        condition: {
+          urlFilter: pattern.replace(/^\*:\/\//, "||").replace(/\/\*$/, ""),
+          resourceTypes: [...ALL_RESOURCE_TYPES],
+          ...scoped,
+        },
+      });
+      id += 1;
+    }
+    for (const type of effective.types) {
+      built.push({
+        id,
+        priority: 1,
+        action: { type: "block" },
+        condition: {
+          // Sans urlFilter, la règle vise toutes les URL : c'est le type qui
+          // discrimine. On n'utilise "other" que si le type n'a pas de
+          // correspondance exacte, et jamais pour autre chose que lui-même.
+          resourceTypes: [DNR_TYPE_BY_CDP[type] || "other"],
+          ...scoped,
+        },
+      });
+      id += 1;
+    }
+    return built;
+  };
+
+  let measuredBytes = 0;
+  let blockedCount = 0;
+
+  try {
+    // Règles de session : `tabIds` est refusé sur les règles dynamiques, Chrome
+    // rejetterait la règle entière.
+    const existing = await chromeCall(chrome.declarativeNetRequest.getSessionRules);
+    const stale = (existing || [])
+      .filter((rule) => rule.id >= TRAFFIC_RULE_ID_BASE && rule.id < TRAFFIC_RULE_ID_BASE + 500)
+      .map((rule) => rule.id);
+    await chromeCall(chrome.declarativeNetRequest.updateSessionRules, {
+      removeRuleIds: stale,
+      addRules: buildRules(botTabIds),
+    });
+  } catch (error) {
+    throw new Error(`Blocage réseau impossible : ${error.message}`);
+  }
+
+  // Mesure : `encodedDataLength` est ce que le proxy a réellement transporté.
+  // Pas d'option « responseHeaders » : elle ferait collecter tous les en-têtes
+  // de toutes les réponses pour un gain nul ici.
+  const onResponse = (details) => {
+    if (typeof details.encodedDataLength === "number" && details.encodedDataLength > 0) {
+      measuredBytes += details.encodedDataLength;
+    }
+  };
+  const onError = (details) => {
+    if (details.error === "net::ERR_BLOCKED_BY_CLIENT") blockedCount += 1;
+  };
+  chrome.webRequest.onCompleted.addListener(onResponse, { urls: ["<all_urls>"] });
+  chrome.webRequest.onErrorOccurred.addListener(onError, { urls: ["<all_urls>"] });
+
+  return {
+    active: true,
+    types: effective.types,
+    patterns: effective.patterns,
+    /**
+     * Ajoute un onglet à la portée. Un clic qui ouvre une popup la ferait
+     * charger sans filtre — donc au prix fort — alors que c'est précisément la
+     * page de destination qu'on visite.
+     */
+    includeTab: async (extraTabId) => {
+      if (!Number.isInteger(extraTabId) || botTabIds.includes(extraTabId)) return;
+      botTabIds.push(extraTabId);
+      try {
+        await chromeCall(chrome.declarativeNetRequest.updateSessionRules, {
+          removeRuleIds: [...ruleIds],
+          addRules: buildRules(botTabIds),
+        });
+      } catch {
+        // Sans extension de portée la visite reste valide, elle coûte plus cher.
+      }
+    },
+    stats: () => ({ blocked: blockedCount, bytes: measuredBytes }),
+    dispose: async () => {
+      chrome.webRequest.onCompleted.removeListener(onResponse);
+      chrome.webRequest.onErrorOccurred.removeListener(onError);
+      try {
+        await chromeCall(chrome.declarativeNetRequest.updateSessionRules, { removeRuleIds: [...ruleIds] });
+      } catch { /* les règles seront remplacées au prochain cycle */ }
+    },
+  };
+}
+
+/**
+ * Correspondance type CDP -> type `declarativeNetRequest`.
+ * Un type absent d'ici n'est pas traduisible sans élargir le blocage (le
+ * fourre-tout « other »), donc il est ignoré plutôt que mal appliqué.
+ */
+const DNR_TYPE_BY_CDP = {
+  Image: "image",
+  Media: "media",
+  Font: "font",
+  Stylesheet: "stylesheet",
+};
+
+const ALL_RESOURCE_TYPES = [
+  "main_frame", "sub_frame", "stylesheet", "script", "image", "font", "object",
+  "xmlhttprequest", "ping", "csp_report", "media", "websocket", "other",
+];
+
+/** Lit la politique de blocage depuis les cases à cocher du panneau. */
+function readTrafficPolicyFromUi() {
+  const blockedTypes = [];
+  if (trafficBlockImagesInput?.checked) blockedTypes.push("Image");
+  if (trafficBlockMediaInput?.checked) blockedTypes.push("Media");
+  if (trafficBlockFontsInput?.checked) blockedTypes.push("Font", "TextTrack");
+  if (trafficBlockStylesInput?.checked) blockedTypes.push("Stylesheet");
+  return {
+    blockedTypes,
+    blockedUrlPatterns: trafficBlockTrackersInput?.checked ? [...(Traffic.DEFAULT_BLOCKED_URL_PATTERNS || [])] : [],
+  };
+}
+
+/** Reflète une politique enregistrée dans les cases du panneau. */
+function applyTrafficPolicyToUi(policy) {
+  const effective = buildBlockPolicy(policy);
+  const has = (type) => effective.types.includes(type);
+  if (trafficBlockImagesInput) trafficBlockImagesInput.checked = has("Image");
+  if (trafficBlockMediaInput) trafficBlockMediaInput.checked = has("Media");
+  if (trafficBlockFontsInput) trafficBlockFontsInput.checked = has("Font");
+  if (trafficBlockStylesInput) trafficBlockStylesInput.checked = has("Stylesheet");
+  if (trafficBlockTrackersInput) trafficBlockTrackersInput.checked = effective.patterns.length > 0;
+}
+
+async function saveTrafficPolicyFromUi() {
+  try {
+    await chrome.storage.local.set({ [TRAFFIC_POLICY_KEY]: readTrafficPolicyFromUi() });
+    await renderTrafficStats();
+  } catch (error) {
+    addLog("Réglage du trafic non enregistré", error.message, true);
+  }
+}
+
+/** Affiche les octets réellement mesurés, jamais une estimation inventée. */
+async function renderTrafficStats() {
+  if (!trafficStatsNode) return;
+  try {
+    const stored = await chrome.storage.local.get(TRAFFIC_STATS_KEY);
+    const stats = stored?.[TRAFFIC_STATS_KEY] || {};
+    const visits = Number(stats.visits) || 0;
+    if (!visits) {
+      trafficStatsNode.textContent = "Aucune visite mesurée pour l’instant.";
+      return;
+    }
+    const perVisit = (Number(stats.bytes) || 0) / visits;
+    trafficStatsNode.textContent =
+      `${formatBytes(stats.bytes)} transférés sur ${visits.toLocaleString("fr")} visite(s), `
+      + `soit ${formatBytes(perVisit)} par visite · ${(Number(stats.blocked) || 0).toLocaleString("fr")} requête(s) bloquée(s).`;
+  } catch {
+    trafficStatsNode.textContent = "Statistiques de trafic indisponibles.";
+  }
+}
+
+for (const input of [trafficBlockImagesInput, trafficBlockMediaInput, trafficBlockFontsInput, trafficBlockStylesInput, trafficBlockTrackersInput]) {
+  input?.addEventListener("change", saveTrafficPolicyFromUi);
+}
+
+/** Charge la politique de blocage enregistrée (ou les valeurs par défaut). */
+async function loadTrafficPolicy() {
+  try {
+    const stored = await chrome.storage.local.get(TRAFFIC_POLICY_KEY);
+    const saved = stored?.[TRAFFIC_POLICY_KEY];
+    if (!saved || typeof saved !== "object") return {};
+    return {
+      blockedTypes: Array.isArray(saved.blockedTypes) ? saved.blockedTypes : undefined,
+      blockedUrlPatterns: Array.isArray(saved.blockedUrlPatterns) ? saved.blockedUrlPatterns : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+/** Ajoute les octets d'une visite aux statistiques persistées. */
+async function recordTrafficStats(visitBytes, blockedRequests) {
+  try {
+    const stored = await chrome.storage.local.get(TRAFFIC_STATS_KEY);
+    const stats = stored?.[TRAFFIC_STATS_KEY] || {};
+    await chrome.storage.local.set({
+      [TRAFFIC_STATS_KEY]: {
+        visits: (Number(stats.visits) || 0) + 1,
+        bytes: (Number(stats.bytes) || 0) + Math.max(0, Number(visitBytes) || 0),
+        blocked: (Number(stats.blocked) || 0) + Math.max(0, Number(blockedRequests) || 0),
+        since: stats.since || new Date().toISOString(),
+      },
+    });
+  } catch {
+    // Une statistique perdue ne doit jamais faire échouer une visite.
+  }
 }
 
 /**
