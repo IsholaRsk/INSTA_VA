@@ -2,7 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import {
+// traffic.js est un SCRIPT CLASSIQUE (comme bot-utils.js) : il n'a pas
+// d'export ES. On l'évalue et on lit son API sur le global, exactement comme
+// le fait le panneau dans le navigateur.
+const {
   DEFAULT_BLOCKED_TYPES,
   DEFAULT_BLOCKED_URL_PATTERNS,
   OPTIONAL_TYPES,
@@ -12,7 +15,12 @@ import {
   buildBlockPolicy,
   summarizeSavings,
   formatBytes,
-} from '../extension/traffic.js';
+} = (() => {
+  const source = readFileSync(new URL('../extension/traffic.js', import.meta.url), 'utf8');
+  const holder = {};
+  new Function('globalThis', 'module', source)(holder, { exports: {} });
+  return holder.InstaVATraffic;
+})();
 
 const SIDE_PANEL = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
 const MANIFEST = JSON.parse(readFileSync(new URL('../extension/manifest.json', import.meta.url), 'utf8'));
