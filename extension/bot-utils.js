@@ -774,9 +774,10 @@
     return Math.round(base * (0.6 + value * 0.8));
   }
 
+  /** Un libellé vide est autorisé : le bot se contente d'ouvrir la page et de cliquer. */
   /**
-   * Un libellé peut déclencher une action sensible : toujours confirmer avant
-   * le clic. Sans libellé il n'y a aucun clic, donc rien à confirmer.
+   * Un libellé peut déclencher une action sensible : toujours confirmer avant le clic.
+   * Sans libellé, le lien choisi automatiquement est aussi soumis à confirmation.
    */
   function isSensitiveLabel(value) {
     var normalized = String(value || "")
@@ -800,52 +801,11 @@
     return { ok: true, label: label };
   }
 
-  /**
-   * Nombre de clics d'une visite, exactement comme Ghost-Clicker :
-   *  - aucun libellé        → 0 clic (on attend une redirection automatique) ;
-   *  - seulement le premier → 1 clic ;
-   *  - les deux libellés    → 2 clics, le second au même emplacement.
-   *
-   * Le second libellé est refusé lorsqu'il n'y a pas de premier : sans lui,
-   * il n'y a aucun emplacement où cliquer deux fois.
-   */
-  function clickPlanFor(target) {
-    var first = String((target && target.linkLabel) || "").trim();
-    var second = String((target && target.secondLinkLabel) || "").trim();
-    if (!first) return { clicks: 0, first: "", second: "" };
-    if (!second) return { clicks: 1, first: first, second: "" };
-    return { clicks: 2, first: first, second: second };
-  }
-
-  /** Valide la paire de libellés ; renvoie { ok, first, second, message }. */
-  function normalizeClickLabels(firstValue, secondValue) {
-    var first = normalizeLinkLabel(firstValue);
-    if (!first.ok) return { ok: false, first: "", second: "", message: first.message };
-    var second = normalizeLinkLabel(secondValue);
-    if (!second.ok) return { ok: false, first: "", second: "", message: second.message };
-    if (second.label && !first.label) {
-      return {
-        ok: false,
-        first: "",
-        second: "",
-        message: "Un second libellé sans premier n’a pas de sens : le second clic se fait au même emplacement que le premier.",
-      };
-    }
-    return { ok: true, first: first.label, second: second.label, message: "" };
-  }
-
   function describeTargetPlan(target) {
     var mode = normalizeTargetMode(target && target.mode);
     var visits = Number(target && target.executionTarget) || 0;
-    var plan = clickPlanFor(target);
-    var click;
-    if (plan.clicks === 0) {
-      click = "aucun clic : la page doit rediriger d’elle-même";
-    } else if (plan.clicks === 2) {
-      click = `cliquer « ${plan.first} » puis une seconde fois au même emplacement`;
-    } else {
-      click = `cliquer « ${plan.first} »`;
-    }
+    var label = String((target && target.linkLabel) || "").trim();
+    var click = label ? `cliquer « ${label} »` : "cliquer le lien principal de la page";
     if (mode === "goal") {
       return `${visits} visite(s) d’affilée, sans durée : ${click} puis passer à la suivante.`;
     }
@@ -1153,8 +1113,6 @@
     planVisits: planVisits,
     nextVisitDelayMs: nextVisitDelayMs,
     normalizeLinkLabel: normalizeLinkLabel,
-    normalizeClickLabels: normalizeClickLabels,
-    clickPlanFor: clickPlanFor,
     isSensitiveLabel: isSensitiveLabel,
     describeTargetPlan: describeTargetPlan,
     OCR_LANGUAGES: OCR_LANGUAGES.slice(),
