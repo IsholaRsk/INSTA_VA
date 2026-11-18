@@ -10,6 +10,9 @@ const DAILY_JOURNAL_KEY = "dailyClicks";
 const DAILY_JOURNAL_KEEP_DAYS = 40;
 const TRAFFIC_POLICY_KEY = "trafficPolicy";
 const TRAFFIC_STATS_KEY = "trafficStats";
+// Réserve utilisée tant qu'aucune visite n'a été mesurée (~1 Mo par visite une
+// fois images, vidéos et polices bloquées).
+const DEFAULT_VISIT_RESERVE_BYTES = 1_000_000;
 // Plage d'identifiants réservée aux règles DNR du bot (500 règles maximum).
 const TRAFFIC_RULE_ID_BASE = 1000;
 const PROXY_RECOVERY_KEY = "temporaryProxyRecovery";
@@ -26,7 +29,7 @@ const OCR_ASSET_BASE = "vendor/";
 
 const Traffic = globalThis.InstaVATraffic;
 if (!Traffic) throw new Error("Le module traffic.js n’a pas été chargé.");
-const { buildBlockPolicy, summarizeSavings, formatBytes } = Traffic;
+const { buildBlockPolicy, summarizeSavings, formatBytes, parseMegabyteLimit, evaluateTrafficBudget } = Traffic;
 
 const Utils = globalThis.InstaVAUtils;
 if (!Utils) throw new Error("Le module bot-utils.js n’a pas été chargé.");
@@ -123,6 +126,8 @@ const trafficBlockFontsInput = $("trafficBlockFonts");
 const trafficBlockStylesInput = $("trafficBlockStyles");
 const trafficBlockTrackersInput = $("trafficBlockTrackers");
 const trafficStatsNode = $("trafficStats");
+const trafficLimitMbInput = $("trafficLimitMb");
+const resetTrafficStatsButton = $("resetTrafficStats");
 const startButton = $("startButton");
 const stopButton = $("stopButton");
 const statusNode = $("status");
@@ -1269,6 +1274,32 @@ async function startRun() {
       if (dueAt > Date.now()) await waitUntil(dueAt, plan.target.pseudo, runNumber, plan.count);
       if (stopRequested) break;
 
+      // Plafond de consommation proxy : contrôlé AVANT chaque visite, sur des
+      // octets réellement mesurés. Atteint, on clôt la série proprement plutôt
+      // que de laisser filer la facture.
+      const budget = await checkTrafficBudget();
+      if (!budget.allowed) {
+        addLog(
+          "Plafond de consommation atteint",
+          `${formatBytes(budget.usedBytes)} consommés sur un plafond de ${formatBytes(budget.limitBytes)}. `
+            + "La série s’arrête ici : aucune visite supplémentaire ne sera facturée. "
+            + "Augmente la limite ou remets le compteur à zéro pour reprendre.",
+          true,
+        );
+        stopRequested = true;
+        break;
+      }
+      if (budget.reason === "limit-below-one-visit") {
+        addLog(
+          "Plafond inférieur à une visite",
+          `Le plafond de ${formatBytes(budget.limitBytes)} est plus petit que le coût estimé d’une visite. `
+            + "Une seule visite est tentée ; le plafond sera ensuite respecté.",
+          true,
+        );
+      } else if (budget.reason === "within-limit" && budget.remainingBytes !== null) {
+        setStatus(`${plan.target.pseudo} · ${formatBytes(budget.remainingBytes)} de bande passante restants avant le plafond.`);
+      }
+
       // Journal quotidien : il ne sert plus qu'aux statistiques affichées.
       // Aucun plafond quotidien, aucune pause forcée le soir : la série
       // enchaîne ses clics d'un bout à l'autre du plan.
@@ -2156,6 +2187,7 @@ const ALL_RESOURCE_TYPES = [
 
 /** Lit la politique de blocage depuis les cases à cocher du panneau. */
 function readTrafficPolicyFromUi() {
+  const limit = parseMegabyteLimit(trafficLimitMbInput?.value);
   const blockedTypes = [];
   if (trafficBlockImagesInput?.checked) blockedTypes.push("Image");
   if (trafficBlockMediaInput?.checked) blockedTypes.push("Media");
@@ -2164,6 +2196,9 @@ function readTrafficPolicyFromUi() {
   return {
     blockedTypes,
     blockedUrlPatterns: trafficBlockTrackersInput?.checked ? [...(Traffic.DEFAULT_BLOCKED_URL_PATTERNS || [])] : [],
+    // `null` = aucune limite ; la valeur est stockée en octets pour ne pas
+    // dépendre d'un arrondi de saisie.
+    limitBytes: limit.ok ? limit.bytes : null,
   };
 }
 
@@ -2176,9 +2211,17 @@ function applyTrafficPolicyToUi(policy) {
   if (trafficBlockFontsInput) trafficBlockFontsInput.checked = has("Font");
   if (trafficBlockStylesInput) trafficBlockStylesInput.checked = has("Stylesheet");
   if (trafficBlockTrackersInput) trafficBlockTrackersInput.checked = effective.patterns.length > 0;
+  if (trafficLimitMbInput) {
+    const limit = Number(policy?.limitBytes);
+    trafficLimitMbInput.value = Number.isFinite(limit) && limit > 0 ? String(limit / 1_000_000) : "";
+  }
 }
 
 async function saveTrafficPolicyFromUi() {
+  const limit = parseMegabyteLimit(trafficLimitMbInput?.value);
+  if (!limit.ok) {
+    addLog("Limite de consommation ignorée", `${limit.message} Aucun plafond n’est appliqué tant que la valeur n’est pas corrigée.`, true);
+  }
   try {
     await chrome.storage.local.set({ [TRAFFIC_POLICY_KEY]: readTrafficPolicyFromUi() });
     await renderTrafficStats();
@@ -2187,21 +2230,61 @@ async function saveTrafficPolicyFromUi() {
   }
 }
 
-/** Affiche les octets réellement mesurés, jamais une estimation inventée. */
+/**
+ * Vérifie le plafond de consommation avant de lancer une visite.
+ * Retourne { allowed, reason, remainingBytes, limitBytes }.
+ *
+ * La réserve est la consommation moyenne mesurée par visite ; à défaut (toute
+ * première visite), une valeur prudente par défaut. Sans elle, la dernière
+ * visite dépasserait toujours le plafond, puisque ses octets ne sont connus
+ * qu'une fois le chargement terminé.
+ */
+async function checkTrafficBudget() {
+  const stored = await chrome.storage.local.get([TRAFFIC_POLICY_KEY, TRAFFIC_STATS_KEY]);
+  const limitBytes = Number(stored?.[TRAFFIC_POLICY_KEY]?.limitBytes);
+  const stats = stored?.[TRAFFIC_STATS_KEY] || {};
+  const visits = Number(stats.visits) || 0;
+  const usedBytes = Number(stats.bytes) || 0;
+  const measuredPerVisit = visits > 0 ? usedBytes / visits : 0;
+  return evaluateTrafficBudget({
+    limitBytes: Number.isFinite(limitBytes) && limitBytes > 0 ? limitBytes : null,
+    usedBytes,
+    reserveBytes: measuredPerVisit > 0 ? measuredPerVisit : DEFAULT_VISIT_RESERVE_BYTES,
+  });
+}
+
+/**
+ * Affiche les octets réellement mesurés et l'état du plafond.
+ * Jamais d'estimation : si rien n'a été mesuré, on le dit.
+ */
 async function renderTrafficStats() {
   if (!trafficStatsNode) return;
   try {
-    const stored = await chrome.storage.local.get(TRAFFIC_STATS_KEY);
+    const stored = await chrome.storage.local.get([TRAFFIC_STATS_KEY, TRAFFIC_POLICY_KEY]);
     const stats = stored?.[TRAFFIC_STATS_KEY] || {};
     const visits = Number(stats.visits) || 0;
-    if (!visits) {
+    const used = Number(stats.bytes) || 0;
+    const limit = Number(stored?.[TRAFFIC_POLICY_KEY]?.limitBytes);
+    const hasLimit = Number.isFinite(limit) && limit > 0;
+
+    if (!visits && !hasLimit) {
       trafficStatsNode.textContent = "Aucune visite mesurée pour l’instant.";
       return;
     }
-    const perVisit = (Number(stats.bytes) || 0) / visits;
-    trafficStatsNode.textContent =
-      `${formatBytes(stats.bytes)} transférés sur ${visits.toLocaleString("fr")} visite(s), `
-      + `soit ${formatBytes(perVisit)} par visite · ${(Number(stats.blocked) || 0).toLocaleString("fr")} requête(s) bloquée(s).`;
+
+    const parts = [];
+    parts.push(`${formatBytes(used)} consommés sur ${visits.toLocaleString("fr")} visite(s)`);
+    if (visits > 0) parts.push(`soit ${formatBytes(used / visits)} par visite`);
+    parts.push(`${(Number(stats.blocked) || 0).toLocaleString("fr")} requête(s) bloquée(s)`);
+
+    if (hasLimit) {
+      const remaining = Math.max(0, limit - used);
+      const percent = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+      parts.push(`plafond ${formatBytes(limit)} · ${percent} % utilisé · ${formatBytes(remaining)} restants`);
+    } else {
+      parts.push("aucun plafond");
+    }
+    trafficStatsNode.textContent = `${parts.join(" · ")}.`;
   } catch {
     trafficStatsNode.textContent = "Statistiques de trafic indisponibles.";
   }
@@ -2210,6 +2293,22 @@ async function renderTrafficStats() {
 for (const input of [trafficBlockImagesInput, trafficBlockMediaInput, trafficBlockFontsInput, trafficBlockStylesInput, trafficBlockTrackersInput]) {
   input?.addEventListener("change", saveTrafficPolicyFromUi);
 }
+// Le plafond se valide à la sortie du champ : on n'enregistre pas à chaque
+// frappe, sinon « 15 » deviendrait « 1 » puis « 15 ».
+trafficLimitMbInput?.addEventListener("change", saveTrafficPolicyFromUi);
+
+/** Remet la consommation mesurée à zéro (changement de forfait, de liste…). */
+async function resetTrafficStats() {
+  try {
+    await chrome.storage.local.remove(TRAFFIC_STATS_KEY);
+    await renderTrafficStats();
+    addLog("Compteur de trafic remis à zéro", "La consommation mesurée repart de zéro. Le plafond reste celui enregistré.");
+  } catch (error) {
+    addLog("Compteur de trafic non remis à zéro", error.message, true);
+  }
+}
+
+resetTrafficStatsButton?.addEventListener("click", resetTrafficStats);
 
 async function loadTrafficPolicy() {
   try {

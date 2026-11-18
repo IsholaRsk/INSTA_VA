@@ -128,6 +128,10 @@
           <input id="trafficBlockTrackers" type="checkbox" checked>
           <span>Bloquer les traceurs et la mesure d’audience</span>
         </label>
+        <label for="trafficLimitMb" class="space-top">Limite de consommation <span>(Mo, facultatif)</span></label>
+        <input id="trafficLimitMb" type="text" inputmode="decimal" maxlength="12" spellcheck="false" placeholder="Vide ou 0 = illimité">
+        <p class="hint"><strong>Le bot s’arrête de lui-même</strong> quand le plafond est atteint : aucune visite supplémentaire ne part, la série est clôturée proprement et un message l’explique dans le journal. La consommation comptée est celle <strong>réellement mesurée</strong> par le navigateur, pas une estimation. Une réserve d’une visite est gardée sous le plafond, sinon la dernière visite le dépasserait à coup sûr. <strong>Remets le compteur à zéro</strong> après avoir changé de forfait ou de liste de proxys.</p>
+        <button id="resetTrafficStats" type="button">Remettre le compteur à zéro</button>
         <p class="hint" id="trafficStats">Aucune visite mesurée pour l’instant.</p>
       </section>
 

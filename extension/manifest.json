@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Agent visuel local — cibles et redirections",
-  "version": "0.14.1",
+  "version": "0.15.0",
   "description": "Ouvre des URL, clique le lien ou le bouton indiqué (ou l’élément principal) et répète selon le mode intervalle (durée en jours, au moins 100 clics/jour) ou objectif, avec une liste de proxys Webshare sans limite en rotation.",
   "minimum_chrome_version": "116",
   "permissions": [
