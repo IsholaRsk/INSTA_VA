@@ -15,6 +15,8 @@ const {
   buildBlockPolicy,
   summarizeSavings,
   formatBytes,
+  parseMegabyteLimit,
+  evaluateTrafficBudget,
 } = (() => {
   const source = readFileSync(new URL('../extension/traffic.js', import.meta.url), 'utf8');
   const holder = {};
@@ -183,4 +185,74 @@ test('la mesure du trafic ne dépend pas d’options coûteuses', () => {
   // les réponses ; le gain de mesure serait nul et le coût réel.
   assert.ok(!/["']responseHeaders["']/.test(SIDE_PANEL), 'pas de collecte d’en-têtes');
   assert.ok(/encodedDataLength/.test(SIDE_PANEL), 'les octets mesurés viennent du réseau');
+});
+
+test('une limite en Mo vide ou nulle signifie « illimité »', () => {
+  for (const value of [null, undefined, '', '   ', 0, '0', -5]) {
+    const parsed = parseMegabyteLimit(value);
+    assert.equal(parsed.ok, true, `${JSON.stringify(value)} doit être accepté comme « illimité »`);
+    assert.equal(parsed.bytes, null);
+  }
+  // Une limite valide est convertie en octets (base 1000, comme le fournisseur).
+  assert.equal(parseMegabyteLimit('15').bytes, 15_000_000);
+  assert.equal(parseMegabyteLimit('1,5').bytes, 1_500_000, 'la virgule décimale est acceptée');
+});
+
+test('une limite en Mo absurde est refusée avec un message', () => {
+  assert.equal(parseMegabyteLimit('beaucoup').ok, false);
+  assert.equal(parseMegabyteLimit('1e12').ok, false);
+  assert.match(parseMegabyteLimit('beaucoup').message, /invalide/i);
+});
+
+test('le plafond laisse passer tant qu’il reste de la place', () => {
+  const decision = evaluateTrafficBudget({ limitBytes: 10_000_000, usedBytes: 2_000_000, reserveBytes: 1_000_000 });
+  assert.equal(decision.allowed, true);
+  assert.equal(decision.reason, 'within-limit');
+  assert.equal(decision.remainingBytes, 8_000_000);
+});
+
+test('le plafond arrête la série quand la réserve ne tient plus', () => {
+  // 9,5 Mo consommés sur 10 : il reste 0,5 Mo, moins qu'une visite (~1 Mo).
+  const decision = evaluateTrafficBudget({ limitBytes: 10_000_000, usedBytes: 9_500_000, reserveBytes: 1_000_000 });
+  assert.equal(decision.allowed, false, 'la visite suivante dépasserait le plafond');
+  assert.equal(decision.reason, 'reserve-exceeded');
+});
+
+test('plafond atteint : plus aucune visite', () => {
+  const decision = evaluateTrafficBudget({ limitBytes: 10_000_000, usedBytes: 10_000_000, reserveBytes: 1_000_000 });
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, 'limit-reached');
+  assert.equal(decision.remainingBytes, 0);
+  // Même au-delà (mesure imprécise), on reste bloqué.
+  assert.equal(evaluateTrafficBudget({ limitBytes: 10_000_000, usedBytes: 12_000_000 }).allowed, false);
+});
+
+test('un plafond plus petit qu’une visite laisse passer la première', () => {
+  // Sinon le bot ne ferait jamais rien avec un plafond de 0,5 Mo.
+  const first = evaluateTrafficBudget({ limitBytes: 500_000, usedBytes: 0, reserveBytes: 1_000_000 });
+  assert.equal(first.allowed, true);
+  assert.equal(first.reason, 'limit-below-one-visit');
+  // Une fois cette visite faite, on s'arrête.
+  const after = evaluateTrafficBudget({ limitBytes: 500_000, usedBytes: 400_000, reserveBytes: 1_000_000 });
+  assert.equal(after.allowed, false);
+});
+
+test('sans plafond, le bot n’est jamais arrêté', () => {
+  for (const used of [0, 5_000_000, 900_000_000]) {
+    const decision = evaluateTrafficBudget({ limitBytes: null, usedBytes: used, reserveBytes: 1_000_000 });
+    assert.equal(decision.allowed, true);
+    assert.equal(decision.reason, 'no-limit');
+    assert.equal(decision.remainingBytes, null);
+  }
+});
+
+test('le contrôle du plafond est bien branché avant chaque visite', () => {
+  // Sans cet appel dans la boucle, le plafond serait un simple affichage.
+  assert.ok(/const budget = await checkTrafficBudget\(\)/.test(SIDE_PANEL), 'checkTrafficBudget doit être appelé dans la boucle');
+  const checkAt = SIDE_PANEL.indexOf('const budget = await checkTrafficBudget()');
+  const runAt = SIDE_PANEL.indexOf('await executeTargetRun(');
+  assert.ok(checkAt > 0 && runAt > 0 && checkAt < runAt, 'le contrôle doit précéder le lancement de la visite');
+  // Atteint, il doit arrêter la série et le dire.
+  assert.match(SIDE_PANEL, /Plafond de consommation atteint/);
+  assert.match(SIDE_PANEL, /stopRequested = true/);
 });

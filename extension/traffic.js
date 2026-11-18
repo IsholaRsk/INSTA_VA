@@ -163,6 +163,64 @@
     return String(rounded).replace(".", ",") + " " + units[unit];
   }
 
+  /**
+   * Lit une limite de Mo saisie par l'utilisateur.
+   *  - vide, 0 ou négatif  → aucune limite (null)
+   *  - nombre valide       → octets (base 1000, comme le fournisseur facture)
+   *  - texte invalide      → null, avec un message pour l'interface
+   */
+  function parseMegabyteLimit(value) {
+    if (value === null || value === undefined || String(value).trim() === "") {
+      return { ok: true, bytes: null, megabytes: null, message: "" };
+    }
+    var number = Number(String(value).replace(",", "."));
+    if (!Number.isFinite(number)) {
+      return { ok: false, bytes: null, megabytes: null, message: "Limite en Mo invalide : saisis un nombre." };
+    }
+    if (number <= 0) return { ok: true, bytes: null, megabytes: null, message: "" };
+    // 1 Go par prudence : au-delà, la saisie est presque sûrement une faute.
+    if (number > 1024 * 1024) {
+      return { ok: false, bytes: null, megabytes: null, message: "Limite en Mo trop élevée (1 048 576 Mo maximum)." };
+    }
+    return { ok: true, bytes: Math.round(number * 1000 * 1000), megabytes: number, message: "" };
+  }
+
+  /**
+   * Décide si une visite peut partir au regard du plafond de consommation.
+   *
+   * `usedBytes` est la consommation MESURÉE cumulée (jamais extrapolée).
+   * `reserveBytes` couvre le coût d'une visite supplémentaire : sans marge, le
+   * bot dépasserait le plafond à chaque dernière visite, puisque les octets ne
+   * sont connus qu'APRÈS le chargement.
+   *
+   * Retourne { allowed, reason, remainingBytes, usedBytes, limitBytes }.
+   */
+  function evaluateTrafficBudget(options) {
+    var settings = options || {};
+    var limit = settings.limitBytes === null || settings.limitBytes === undefined
+      ? null
+      : Math.max(0, Number(settings.limitBytes) || 0);
+    var used = Math.max(0, Number(settings.usedBytes) || 0);
+    var reserve = Math.max(0, Number(settings.reserveBytes) || 0);
+
+    if (limit === null) {
+      return { allowed: true, reason: "no-limit", remainingBytes: null, usedBytes: used, limitBytes: null };
+    }
+    var remaining = Math.max(0, limit - used);
+    if (remaining <= 0) {
+      return { allowed: false, reason: "limit-reached", remainingBytes: 0, usedBytes: used, limitBytes: limit };
+    }
+    // Plafond plus petit qu'une visite : on laisse passer une visite, sinon le
+    // bot ne ferait jamais rien. Elle est signalée comme dépassement probable.
+    if (reserve > 0 && remaining < reserve) {
+      if (used === 0) {
+        return { allowed: true, reason: "limit-below-one-visit", remainingBytes: remaining, usedBytes: used, limitBytes: limit };
+      }
+      return { allowed: false, reason: "reserve-exceeded", remainingBytes: remaining, usedBytes: used, limitBytes: limit };
+    }
+    return { allowed: true, reason: "within-limit", remainingBytes: remaining, usedBytes: used, limitBytes: limit };
+  }
+
   var api = {
     DEFAULT_BLOCKED_TYPES: DEFAULT_BLOCKED_TYPES.slice(),
     DEFAULT_BLOCKED_URL_PATTERNS: DEFAULT_BLOCKED_URL_PATTERNS.slice(),
@@ -173,6 +231,8 @@
     buildBlockPolicy: buildBlockPolicy,
     summarizeSavings: summarizeSavings,
     formatBytes: formatBytes,
+    parseMegabyteLimit: parseMegabyteLimit,
+    evaluateTrafficBudget: evaluateTrafficBudget,
   };
 
   if (typeof module === "object" && module && module.exports) module.exports = api;
