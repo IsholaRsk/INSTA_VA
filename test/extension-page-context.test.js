@@ -94,7 +94,7 @@ test('le code envoyé à la page ne référence jamais InstaVAUtils (absent de l
   // Toute occurrence dans un template `Runtime.evaluate` est un bug : le
   // panneau reçoit alors « InstaVAUtils is not defined » et le cycle échoue.
   const chunks = [];
-  for (const name of ['findExactClickables', 'readPageGate']) {
+  for (const name of ['findExactClickables', 'findPrimaryLink', 'readPageGate']) {
     const start = SIDE_PANEL.indexOf(`async function ${name}(`);
     assert.ok(start > 0, `${name} introuvable`);
     chunks.push([name, SIDE_PANEL.slice(start, start + 6000)]);
@@ -113,53 +113,18 @@ test('le code envoyé à la page ne référence jamais InstaVAUtils (absent de l
   }
 });
 
-test('aucun code de sélection automatique ne subsiste dans la page', () => {
-  // Ghost-Clicker ne choisit jamais un élément à la place de l’utilisateur :
-  // sans libellé, il n’y a aucun clic. La sélection automatique du « lien
-  // principal » (et son barème scoreClickable) est donc retirée du panneau.
-  const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
-  assert.ok(!/function findPrimaryLink\s*\(/.test(source), 'findPrimaryLink doit être supprimé');
-});
-
-test('les règles de clic suivent Ghost-Clicker : 0, 1 ou 2 clics', () => {
-  const window = pageWindow(PROFILE_HTML, { withUtils: true });
-  const utils = window.InstaVAUtils;
-  assert.ok(utils && typeof utils.clickPlanFor === 'function', 'bot-utils doit exposer clickPlanFor');
-
-  // Les objets renvoyés viennent de la fenêtre jsdom : on les copie pour
-  // comparer des valeurs du même royaume.
-  const plan = (target) => ({ ...utils.clickPlanFor(target) });
-  // Aucun libellé : aucun clic, même si la page est pleine de liens.
-  assert.deepEqual(plan({ linkLabel: '', secondLinkLabel: '' }), { clicks: 0, first: '', second: '' });
-  assert.deepEqual(plan({}), { clicks: 0, first: '', second: '' });
-  // Un libellé : un seul clic.
-  assert.deepEqual(plan({ linkLabel: 'Continuer' }), { clicks: 1, first: 'Continuer', second: '' });
-  // Deux libellés : deux clics, le second au même emplacement.
-  assert.deepEqual(
-    plan({ linkLabel: 'Continuer', secondLinkLabel: 'Confirmer' }),
-    { clicks: 2, first: 'Continuer', second: 'Confirmer' },
-  );
-
-  // Un second libellé sans premier est refusé (rien à recliquer).
-  const invalid = utils.normalizeClickLabels('', 'Confirmer');
-  assert.equal(invalid.ok, false);
-  assert.match(invalid.message, /second libellé sans premier/i);
-  // Les espaces superflus sont normalisés.
-  assert.deepEqual(
-    { ...utils.normalizeClickLabels('  Continuer  vers  la boutique ', '') },
-    { ok: true, first: 'Continuer vers la boutique', second: '', message: '' },
-  );
-});
-
-test('la description du plan annonce le bon nombre de clics', () => {
-  const window = pageWindow(PROFILE_HTML, { withUtils: true });
-  const utils = window.InstaVAUtils;
-  assert.match(utils.describeTargetPlan({ mode: 'goal', executionTarget: 10, linkLabel: '' }), /aucun clic/i);
-  assert.match(utils.describeTargetPlan({ mode: 'goal', executionTarget: 10, linkLabel: 'Continuer' }), /cliquer « Continuer »/);
-  assert.match(
-    utils.describeTargetPlan({ mode: 'goal', executionTarget: 10, linkLabel: 'Continuer', secondLinkLabel: 'Confirmer' }),
-    /une seconde fois au même emplacement/i,
-  );
+test('findPrimaryLink s’exécute dans la page sans lever d’exception', () => {
+  const window = pageWindow(PROFILE_HTML);
+  const expression = expressionOf('findPrimaryLink');
+  // Avant correctif, cet appel levait ReferenceError: InstaVAUtils is not defined,
+  // ce que le panneau traduisait par « Impossible de repérer les éléments cliquables ».
+  const result = window.eval(expression);
+  assert.ok(Array.isArray(result), 'la page doit renvoyer un tableau de candidats');
+  assert.ok(result.length > 0, 'les éléments cliquables visibles doivent être renvoyés');
+  const labels = result.map((item) => item.text);
+  assert.ok(labels.includes("Plus d'infos"), `candidats renvoyés : ${JSON.stringify(labels)}`);
+  // Le tri appartient au panneau : la page renvoie tout, sans classement.
+  assert.equal(result.some((item) => 'score' in item), false, 'aucun score ne doit être calculé dans la page');
 });
 
 test('findExactClickables s’exécute dans la page et filtre sur le libellé exact', () => {
@@ -177,49 +142,47 @@ test('findExactClickables s’exécute dans la page et filtre sur le libellé ex
   assert.equal(result.length, 0);
 });
 
-test('la page ne classe plus rien : seul le panneau décide, et il ne choisit plus', () => {
-  // Le classement vivait dans la page (scoreClickable via InstaVAUtils), ce qui
-  // cassait tout cycle. Il avait été déplacé côté panneau ; Ghost-Clicker
-  // supprime la question : sans libellé, aucun élément n'est choisi.
-  const source = readFileSync(new URL('../extension/sidepanel.js', import.meta.url), 'utf8');
-  // Aucune expression envoyée à la page ne doit contenir de score ni de tri.
-  const templates = [...source.matchAll(/`([\s\S]*?)`/g)].map((match) => match[1]);
-  const pageSide = templates.filter((text) => text.includes('document.querySelectorAll'));
-  assert.ok(pageSide.length, 'au moins une expression de page doit exister');
-  for (const text of pageSide) {
-    const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-    assert.ok(!/scoreClickable/.test(code), 'la page ne doit jamais calculer de score');
-    assert.ok(!/InstaVAUtils/.test(code), 'la page ne doit jamais appeler InstaVAUtils');
-  }
-  // `scoreClickable` reste disponible pour d'autres usages, mais le panneau ne
-  // l'utilise plus pour choisir un élément à cliquer.
-  assert.ok(!/InstaVAUtils\.scoreClickable/.test(source), 'le panneau ne sélectionne plus par score');
-});
+test('le classement déplacé côté panneau donne le même résultat que dans la page', () => {
+  // Le classement a été déplacé hors de la page (InstaVAUtils n'y existe pas).
+  // On rejoue le calcul avec la vraie fonction de bot-utils pour vérifier que
+  // la sélection reste celle que le barème définit.
+  const window = pageWindow(PROFILE_HTML, { withUtils: true });
+  const utils = window.InstaVAUtils;
+  assert.ok(utils && typeof utils.scoreClickable === 'function', 'bot-utils doit exposer scoreClickable');
 
-test('plusieurs libellés identiques : la page renvoie le premier du document', () => {
-  // Règle Ghost-Clicker (`.first` en Playwright) : le premier élément gagne.
-  // Le panneau prend `matches[0]`, donc l'ordre renvoyé par la page compte.
-  const duplicated = `<!doctype html><html lang="fr"><body>
-    <main>
-      <a href="https://exemple.fr/premier">Continuer</a>
-      <p>un peu de texte</p>
-      <a href="https://exemple.fr/second">Continuer</a>
-    </main>
-  </body></html>`;
-  const window = pageWindow(duplicated);
-  const start = SIDE_PANEL.indexOf('async function findExactClickables(tabId');
-  const chunk = SIDE_PANEL.slice(start, start + 1600);
-  const template = chunk.match(/const expression = `([\s\S]*?)`;\n/)[1];
-  const expression = template
-    .replace(/\$\{JSON\.stringify\(normalizedLabel\)\}/g, JSON.stringify('continuer'))
-    .replace(/\$\{clickableHelpersSource\(\)\}/g, helpersSource())
-    .replace(/\$\{JSON\.stringify\(CLICKABLE_SELECTOR\)\}/g, JSON.stringify(clickableSelector()));
-  const result = window.eval(expression);
-  assert.equal(result.length, 2, 'les deux liens portent le même libellé');
-  assert.equal(result[0].href, 'https://exemple.fr/premier', 'le premier du DOM arrive en tête');
-  // Et le panneau, lui, ne refuse plus : il clique le premier.
-  assert.ok(/const match = matches\[0\];/.test(SIDE_PANEL), 'le panneau doit prendre matches[0]');
-  assert.ok(!/libellés identiques[^`]*return \{ status: "skipped"/.test(SIDE_PANEL), 'plus de refus sur ambiguïté');
+  const links = window.eval(expressionOf('findPrimaryLink'));
+  const scored = links.map((link) => {
+    const ranking = utils.scoreClickable({
+      text: link.text,
+      href: link.href,
+      area: link.area,
+      kind: link.type,
+      inNavigation: link.inNavigation,
+      isControl: link.isControl,
+      tagName: link.tagName,
+      hasClickHandler: link.hasClickHandler,
+    });
+    return { ...link, score: ranking.score };
+  }).sort((a, b) => b.score - a.score);
+
+  // Les liens de la navigation ne peuvent pas être choisis tant qu'un candidat
+  // hors navigation existe : c'est la règle appliquée par findPrimaryLink.
+  const main = scored.filter((link) => !link.inNavigation);
+  const picked = (main.length ? main : scored)[0];
+  assert.ok(picked && picked.text, `élément choisi : « ${picked?.text} »`);
+  assert.equal(picked.inNavigation, false, 'le candidat choisi doit être hors navigation');
+
+  // Mesuré sur ce barème : « S'ABONNER (GRATUITEMENT) » n'est pas reconnu comme
+  // libellé d'action (la liste contient « s'abonner » seul), il garde donc sa
+  // prime de bouton. Un libellé d'action explicite, lui, est toujours rétrogradé.
+  const action = utils.scoreClickable({ text: 'Suivre', href: '', area: 9680, kind: 'bouton', isControl: true });
+  const neutral = utils.scoreClickable({ text: "Plus d'infos", href: '', area: 9680, kind: 'lien', hasClickHandler: true });
+  assert.equal(action.actionButton, true);
+  assert.ok(neutral.score > action.score, `neutre ${neutral.score} doit dépasser action ${action.score}`);
+
+  // Un lien de bio court reste prioritaire sur tout bouton, action ou non.
+  const bio = utils.scoreClickable({ text: 'shop', href: 'https://instagram.com/shop.brand', area: 5400, kind: 'lien' });
+  assert.ok(bio.score > neutral.score, `bio ${bio.score} doit dépasser le lien neutre ${neutral.score}`);
 });
 
 test('un échec de détection n’est jamais imputé au proxy', () => {
