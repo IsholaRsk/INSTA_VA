@@ -34,12 +34,17 @@
    * Types de ressources bloqués par défaut, avec les noms EXACTS du protocole
    * Chrome DevTools (`Network.ResourceType` / `Fetch.RequestPattern`).
    *
-   * Volontairement limité à trois types qui ont une correspondance EXACTE en
-   * `declarativeNetRequest`. Y ajouter TextTrack, Manifest ou Prefetch les
-   * ferait retomber sur le type fourre-tout « other », donc bloquer bien plus
-   * que prévu. Ces trois-là pèsent par ailleurs quelques kilo-octets.
+   * Tous ont une correspondance EXACTE en `declarativeNetRequest`. Y ajouter
+   * TextTrack, Manifest ou Prefetch les ferait retomber sur le type
+   * fourre-tout « other », donc bloquer bien plus que prévu.
+   *
+   * `SubFrame` (iframes) est bloqué : le panneau ne lit QUE le document
+   * principal (`Runtime.evaluate` sans `contextId`). Une iframe ne peut donc
+   * jamais porter le libellé cliquable, et certaines pages en empilent des
+   * dizaines (publicités, lecteurs vidéo, widgets sociaux). C'est l'un des
+   * plus gros postes restants une fois les médias bloqués.
    */
-  var DEFAULT_BLOCKED_TYPES = ["Image", "Media", "Font"];
+  var DEFAULT_BLOCKED_TYPES = ["Image", "Media", "Font", "SubFrame"];
 
   /**
    * Types proposables au blocage mais jamais imposés.
@@ -53,11 +58,19 @@
    */
   var PROTECTED_TYPES = ["Document", "Script", "XHR", "Fetch"];
 
-  /** Toutes les valeurs légales de `Network.ResourceType`, pour filtrer les saisies. */
+  /**
+   * Toutes les valeurs légales, pour filtrer les saisies.
+   * Mélange volontaire des deux vocabulaires utilisés par nos règles :
+   * `Network.ResourceType` (Content-Type perçu par le moteur) et
+   * `declarativeNetRequest.ResourceType` (celui de nos règles). `SubFrame`
+   * n'existe pas côté CDP : c'est une notion de déclaration réseau, la seule
+   * façon de bloquer une iframe. On l'ajoute donc explicitement.
+   */
   var KNOWN_TYPES = [
     "Document", "Stylesheet", "Image", "Media", "Font", "Script", "TextTrack",
     "XHR", "Fetch", "Prefetch", "EventSource", "WebSocket", "Manifest",
     "SignedExchange", "Ping", "CSPViolationReport", "Preflight", "FedCM", "Other",
+    "SubFrame",
   ];
 
   /**
@@ -221,6 +234,40 @@
     return { allowed: true, reason: "within-limit", remainingBytes: remaining, usedBytes: used, limitBytes: limit };
   }
 
+  /**
+   * Décide s'il faut recharger la page après avoir décodé l'URL de destination.
+   *
+   * Contexte : quand un clic mène à un redirecteur masqué (lien en bio
+   * Instagram → `l.instagram.com/?u=…`), le bot ouvrait JUSQU'ICI la
+   * destination dans un second chargement complet. C'est le poste le plus cher
+   * de tout le cycle : une page entière payée deux fois.
+   *
+   * Or le redirecteur n'est qu'un emballage : son corps ne contient
+   * généralement rien d'utile, et la destination a déjà été chargée par le
+   * serveur de redirection (donc facturée). Rouvrir l'URL décodée est donc
+   * payé une deuxième fois pour un contenu qu'on ne lit pas davantage.
+   *
+   * Règle retenue : on ne recharge que si le rechargement a une chance
+   * d'apporter quelque chose que la page actuelle n'a pas déjà.
+   *
+   * Retourne { reload, reason }.
+   */
+  function evaluateRedirectUnwrap(options) {
+    var settings = options || {};
+    var current = String(settings.currentUrl == null ? "" : settings.currentUrl);
+    var unwrapped = String(settings.unwrappedUrl == null ? "" : settings.unwrappedUrl);
+    var option = settings.option || "auto"; // "auto" | "always" | "never"
+
+    if (!unwrapped || unwrapped === current) return { reload: false, reason: "nothing-to-unwrap" };
+    if (!/^https?:/i.test(unwrapped)) return { reload: false, reason: "not-http" };
+    if (option === "never") return { reload: false, reason: "disabled" };
+    if (option === "always") return { reload: true, reason: "forced" };
+
+    // « auto » : le redirecteur a déjà été chargé, et la destination aussi
+    // (en arrière-plan ou côté serveur). On s'arrête là.
+    return { reload: false, reason: "auto-skip" };
+  }
+
   var api = {
     DEFAULT_BLOCKED_TYPES: DEFAULT_BLOCKED_TYPES.slice(),
     DEFAULT_BLOCKED_URL_PATTERNS: DEFAULT_BLOCKED_URL_PATTERNS.slice(),
@@ -233,6 +280,7 @@
     formatBytes: formatBytes,
     parseMegabyteLimit: parseMegabyteLimit,
     evaluateTrafficBudget: evaluateTrafficBudget,
+    evaluateRedirectUnwrap: evaluateRedirectUnwrap,
   };
 
   if (typeof module === "object" && module && module.exports) module.exports = api;
