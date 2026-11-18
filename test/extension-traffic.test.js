@@ -17,6 +17,7 @@ const {
   formatBytes,
   parseMegabyteLimit,
   evaluateTrafficBudget,
+  evaluateRedirectUnwrap,
 } = (() => {
   const source = readFileSync(new URL('../extension/traffic.js', import.meta.url), 'utf8');
   const holder = {};
@@ -39,8 +40,11 @@ test('les types bloqués par défaut couvrent le gros du poids, sans casser le r
   // Chaque type par défaut doit avoir une correspondance DNR exacte : mapper un
   // type sur le fourre-tout « other » bloquerait bien plus que demandé.
   for (const type of DEFAULT_BLOCKED_TYPES) {
-    assert.ok(['Image', 'Media', 'Font'].includes(type), `${type} n’a pas de correspondance DNR exacte`);
+    assert.ok(['Image', 'Media', 'Font', 'SubFrame'].includes(type), `${type} n’a pas de correspondance DNR exacte`);
   }
+  // Le bot ne lit que le document principal (aucun `contextId`) : une iframe
+  // ne peut jamais porter le libellé, la bloquer ne peut rien casser.
+  assert.ok(DEFAULT_BLOCKED_TYPES.includes('SubFrame'), 'les iframes sont bloquées par défaut');
   // Sans ces types, ni détection ni clic ne sont possibles.
   for (const type of ['Document', 'Script', 'XHR', 'Fetch']) {
     assert.ok(PROTECTED_TYPES.includes(type));
@@ -255,4 +259,68 @@ test('le contrôle du plafond est bien branché avant chaque visite', () => {
   // Atteint, il doit arrêter la série et le dire.
   assert.match(SIDE_PANEL, /Plafond de consommation atteint/);
   assert.match(SIDE_PANEL, /stopRequested = true/);
+});
+
+test('le lien en bio n’est plus rechargé par défaut', () => {
+  // Comportement précédent : après avoir décodé l.instagram.com/?u=…, le bot
+  // rouvrait la destination dans un second chargement COMPLET. C'était le
+  // poste le plus cher du cycle : une page entière payée deux fois.
+  const decision = evaluateRedirectUnwrap({
+    currentUrl: 'https://l.instagram.com/?u=https%3A%2F%2Fexemple.fr%2Fpage',
+    unwrappedUrl: 'https://exemple.fr/page',
+  });
+  assert.equal(decision.reload, false);
+  assert.equal(decision.reason, 'auto-skip');
+});
+
+test('le rechargement du lien en bio reste possible sur demande', () => {
+  const forced = evaluateRedirectUnwrap({
+    currentUrl: 'https://l.instagram.com/?u=x',
+    unwrappedUrl: 'https://exemple.fr/page',
+    option: 'always',
+  });
+  assert.equal(forced.reload, true, 'la case à cocher doit pouvoir rétablir l’ancien comportement');
+  const disabled = evaluateRedirectUnwrap({
+    currentUrl: 'https://l.instagram.com/?u=x',
+    unwrappedUrl: 'https://exemple.fr/page',
+    option: 'never',
+  });
+  assert.equal(disabled.reload, false);
+});
+
+test('pas de rechargement quand il n’y a rien à décoder', () => {
+  // URL inchangée : rien à faire.
+  assert.equal(evaluateRedirectUnwrap({ currentUrl: 'https://a.fr', unwrappedUrl: 'https://a.fr' }).reload, false);
+  // Pas de destination décodée.
+  assert.equal(evaluateRedirectUnwrap({ currentUrl: 'https://a.fr', unwrappedUrl: '' }).reload, false);
+  // Schéma non HTTP (javascript:, data:) : jamais rouvert.
+  assert.equal(evaluateRedirectUnwrap({ currentUrl: 'https://a.fr', unwrappedUrl: 'javascript:void(0)' }).reload, false);
+});
+
+test('le panneau ne recharge plus la destination sans décision explicite', () => {
+  const source = SIDE_PANEL;
+  assert.ok(/evaluateRedirectUnwrap\(/.test(source), 'la décision doit passer par la fonction testée');
+  // L'ancien code rechargeait dès qu'une URL décodée existait.
+  assert.ok(!/if \(unwrapped && unwrapped !== finalTab\.url && \/\^https\?:\/i\.test\(unwrapped\)\) \{\n\s*addLog/.test(source),
+    'plus de rechargement inconditionnel');
+  assert.ok(/reloadUnwrappedInput/.test(source), 'la case de rechargement doit exister');
+});
+
+test('les iframes sont bloquées et annoncées comme telles', () => {
+  assert.ok(DEFAULT_BLOCKED_TYPES.includes('SubFrame'));
+  const policy = buildBlockPolicy({ blockedTypes: ['subframe'], blockedUrlPatterns: [] });
+  assert.deepEqual(policy.types, ['SubFrame'], 'la casse saisie est normalisée');
+  // Correspondance DNR exacte.
+  assert.ok(/SubFrame: "sub_frame"/.test(SIDE_PANEL), 'SubFrame doit correspondre à sub_frame');
+});
+
+test('la page diffère le chargement distant sans casser la lecture', () => {
+  // Les helpers injectés dans la page doivent contenir le report de chargement
+  // ET rester exécutables : une exception ici casserait toute détection.
+  const helpers = SIDE_PANEL.match(/function clickableHelpersSource\(\) \{\s*return `([\s\S]*?)`;\s*\}/);
+  assert.ok(helpers, 'clickableHelpersSource introuvable');
+  const source = helpers[1];
+  assert.ok(/loading", "lazy"/.test(source), 'les ressources distantes doivent être différées');
+  assert.ok(/prefetch-disabled/.test(source), 'les préchargements doivent être neutralisés');
+  assert.ok(!/InstaVAUtils/.test(source.replace(/\/\*[\s\S]*?\*\//g, '')), 'aucun appel au panneau depuis la page');
 });

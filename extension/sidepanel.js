@@ -29,7 +29,7 @@ const OCR_ASSET_BASE = "vendor/";
 
 const Traffic = globalThis.InstaVATraffic;
 if (!Traffic) throw new Error("Le module traffic.js n’a pas été chargé.");
-const { buildBlockPolicy, summarizeSavings, formatBytes, parseMegabyteLimit, evaluateTrafficBudget } = Traffic;
+const { buildBlockPolicy, summarizeSavings, formatBytes, parseMegabyteLimit, evaluateTrafficBudget, evaluateRedirectUnwrap } = Traffic;
 
 const Utils = globalThis.InstaVAUtils;
 if (!Utils) throw new Error("Le module bot-utils.js n’a pas été chargé.");
@@ -126,6 +126,8 @@ const trafficBlockFontsInput = $("trafficBlockFonts");
 const trafficBlockStylesInput = $("trafficBlockStyles");
 const trafficBlockTrackersInput = $("trafficBlockTrackers");
 const trafficStatsNode = $("trafficStats");
+const trafficBlockFramesInput = $("trafficBlockFrames");
+const reloadUnwrappedInput = $("reloadUnwrapped");
 const trafficLimitMbInput = $("trafficLimitMb");
 const resetTrafficStatsButton = $("resetTrafficStats");
 const startButton = $("startButton");
@@ -1861,8 +1863,17 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
     }
     // Lien en bio Instagram : Instagram redirige vers l.instagram.com/?u=… au
     // lieu de la destination. Sans ce décodage, la bio n'est jamais visitée.
+    // Redirecteur masqué (lien en bio Instagram → l.instagram.com/?u=…).
+    // Par défaut on NE recharge PAS la destination : elle a déjà été chargée
+    // par le redirecteur, et un second chargement complet doublait le coût de
+    // la visite pour un contenu qu'on ne lit pas davantage.
     const unwrapped = InstaVAUtils.unwrapRedirectUrl(finalTab.url || "");
-    if (unwrapped && unwrapped !== finalTab.url && /^https?:/i.test(unwrapped)) {
+    const unwrapDecision = evaluateRedirectUnwrap({
+      currentUrl: finalTab.url || "",
+      unwrappedUrl: unwrapped,
+      option: reloadUnwrappedInput?.checked ? "always" : "auto",
+    });
+    if (unwrapDecision.reload) {
       addLog(`${target.pseudo} · lien en bio décodé`, `Le redirecteur masquait la destination : ${unwrapped}`);
       try {
         await chromeCall(chrome.tabs.update, (openedTab || tab).id, { url: unwrapped });
@@ -1871,6 +1882,13 @@ async function processTarget(target, runIndex, runCount, windowId, proxy, proxyP
       } catch (error) {
         addLog(`${target.pseudo} · destination inaccessible`, error.message, true);
       }
+    }
+    if (unwrapped && unwrapped !== finalTab.url && /^https?:/i.test(unwrapped) && !unwrapDecision.reload) {
+      addLog(
+        `${target.pseudo} · destination décodée`,
+        `${unwrapped}\nAucun rechargement : la destination a déjà été chargée par le redirecteur. `
+          + "Coche « recharger la destination finale » si tu as besoin de la visiter pour de bon.",
+      );
     }
     currentUrlNode.textContent = finalTab.url || "";
     const redirectsAfterClick = redirectCount - redirectsBeforeClick;
@@ -2178,6 +2196,7 @@ const DNR_TYPE_BY_CDP = {
   Media: "media",
   Font: "font",
   Stylesheet: "stylesheet",
+  SubFrame: "sub_frame",
 };
 
 const ALL_RESOURCE_TYPES = [
@@ -2193,6 +2212,9 @@ function readTrafficPolicyFromUi() {
   if (trafficBlockMediaInput?.checked) blockedTypes.push("Media");
   if (trafficBlockFontsInput?.checked) blockedTypes.push("Font", "TextTrack");
   if (trafficBlockStylesInput?.checked) blockedTypes.push("Stylesheet");
+  // Les iframes ne portent jamais le libellé : le panneau ne lit que le
+  // document principal. Les bloquer supprime un gros poste de trafic.
+  if (trafficBlockFramesInput?.checked) blockedTypes.push("SubFrame");
   return {
     blockedTypes,
     blockedUrlPatterns: trafficBlockTrackersInput?.checked ? [...(Traffic.DEFAULT_BLOCKED_URL_PATTERNS || [])] : [],
@@ -2210,6 +2232,7 @@ function applyTrafficPolicyToUi(policy) {
   if (trafficBlockMediaInput) trafficBlockMediaInput.checked = has("Media");
   if (trafficBlockFontsInput) trafficBlockFontsInput.checked = has("Font");
   if (trafficBlockStylesInput) trafficBlockStylesInput.checked = has("Stylesheet");
+  if (trafficBlockFramesInput) trafficBlockFramesInput.checked = has("SubFrame");
   if (trafficBlockTrackersInput) trafficBlockTrackersInput.checked = effective.patterns.length > 0;
   if (trafficLimitMbInput) {
     const limit = Number(policy?.limitBytes);
@@ -2290,7 +2313,7 @@ async function renderTrafficStats() {
   }
 }
 
-for (const input of [trafficBlockImagesInput, trafficBlockMediaInput, trafficBlockFontsInput, trafficBlockStylesInput, trafficBlockTrackersInput]) {
+for (const input of [trafficBlockImagesInput, trafficBlockMediaInput, trafficBlockFontsInput, trafficBlockStylesInput, trafficBlockTrackersInput, trafficBlockFramesInput]) {
   input?.addEventListener("change", saveTrafficPolicyFromUi);
 }
 // Le plafond se valide à la sortie du champ : on n'enregistre pas à chaque
@@ -2364,6 +2387,26 @@ const CLICKABLE_SELECTOR = 'a[href], [role="link"], button, input[type="button"]
 
 function clickableHelpersSource() {
   return `
+    // Le panneau ne lit que le document principal, et seulement pour y trouver
+    // un libellé : tout ce qui se charge en arrière-plan (images, iframes,
+    // vidéos, préchargements) n'apporte rien et coûte des mégaoctets de proxy.
+    // On repousse donc le chargement de TOUTE ressource distante hors du
+    // premier écran. Cette fonction s'exécute à chaque lecture de page, donc
+    // elle rattrape les éléments que le site injecte après coup.
+    const deferRemoteLoading = () => {
+      const remote = (url) => /^https?:/i.test(String(url || ""));
+      for (const el of document.querySelectorAll("img[src], iframe[src], video[src], audio[src], source[src]")) {
+        if (el.hasAttribute("loading") || !remote(el.getAttribute("src"))) continue;
+        el.setAttribute("loading", "lazy");
+      }
+      for (const el of document.querySelectorAll('link[rel="prefetch"], link[rel="preload"], link[rel="preconnect"], link[rel="dns-prefetch"]')) {
+        if (remote(el.getAttribute("href"))) el.setAttribute("rel", "prefetch-disabled");
+      }
+      // Les <img> qui n'ont pas encore de src mais un data-src (lazy-loading
+      // maison) restent inertes tant qu'on n'y touche pas : on s'abstient.
+    };
+    try { deferRemoteLoading(); } catch { /* une page qui refuse n'empêche pas la lecture */ }
+
     const normalize = (value) => String(value || "")
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "")
