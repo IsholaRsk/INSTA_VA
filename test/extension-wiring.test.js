@@ -152,6 +152,31 @@ test('extension scripts never call an undeclared function', () => {
   assert.deepEqual([...new Set(problems)], [], `Fonctions manquantes :\n${[...new Set(problems)].join('\n')}`);
 });
 
+test('every panel script parses as a classic script (no ES module syntax)', () => {
+  // Bug réel : traffic.js avait été livré avec un `export { … }`. Chargé par
+  // <script src="traffic.js"></script>, le navigateur rejette TOUT le fichier
+  // (SyntaxError: Unexpected token 'export'), le panneau lève « traffic.js
+  // n’a pas été chargé » et plus aucun bouton ne répond — ni cible, ni proxy.
+  // `node --test` importait le fichier en module et ne voyait donc rien.
+  const html = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
+  const scripts = [...html.matchAll(/<script src="([^"]+)"(?![^>]*type="module")/g)]
+    .map((match) => match[1])
+    // Les bundles tiers (tesseract) sont hors de notre contrôle.
+    .filter((src) => !src.startsWith('vendor/'));
+
+  assert.ok(scripts.length >= 3, `scripts du panneau détectés : ${scripts.join(', ')}`);
+
+  for (const src of scripts) {
+    const source = readFileSync(new URL(`../extension/${src}`, import.meta.url), 'utf8');
+    // Aucune instruction de module ES.
+    assert.ok(!/^\s*(?:export\s|import\s+[\s\S]*?\bfrom\b)/m.test(source),
+      `${src} contient une syntaxe de module ES`);
+    // Et le fichier doit réellement se parser comme script classique.
+    assert.doesNotThrow(() => new Function(source),
+      `${src} ne se parse pas comme script classique`);
+  }
+});
+
 test('the side panel loads its shared helpers before sidepanel.js', () => {
   const html = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
   const utilsIndex = html.indexOf('<script src="bot-utils.js"></script>');
